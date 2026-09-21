@@ -3,6 +3,8 @@ node_modules/
 
 # Python (locust) virtualenvs
 .venv/
+__pycache__/
+*.pyc
 
 # Build output
 dist/

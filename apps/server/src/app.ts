@@ -14,6 +14,7 @@ import { saleStatusRoutes } from './routes/saleStatus';
 import { statusEventRoutes } from './routes/events';
 import { purchaseRoutes } from './routes/purchase';
 import { purchasesRoutes } from './routes/purchases';
+import { adminSalesRoutes } from './routes/adminSales';
 import { SalesRepo } from './repos/sales';
 import { PurchasesRepo } from './repos/purchases';
 import { PurchaseService } from './services/purchaseService';
@@ -122,6 +123,7 @@ export function buildApp(opts: BuildAppOptions = {}): BuiltApp {
     purchaseProducer: producer,
     liveBus,
     liveStatusBroadcaster,
+    redis,
   });
 
   app.register(healthRoutes);
@@ -130,6 +132,7 @@ export function buildApp(opts: BuildAppOptions = {}): BuiltApp {
   app.register(statusEventRoutes);
   app.register(purchaseRoutes, { purchaseMode: cfg.purchaseMode });
   app.register(purchasesRoutes);
+  app.register(adminSalesRoutes);
 
   app.addHook('onClose', async () => {
     liveStatusBroadcaster.stop();

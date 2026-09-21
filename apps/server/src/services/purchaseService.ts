@@ -82,6 +82,13 @@ export class PurchaseService {
       return { result: 'purchased', purchaseId: inserted.rows[0]!.id };
     } catch (err) {
       await client.query('ROLLBACK').catch(() => {});
+      // Two transactions for the same user can overlap: T2's
+      // `INSERT ... WHERE NOT EXISTS` sees T1's insert as not-yet-committed,
+      // blocks on the unique index, then raises 23505 (unique_violation) once
+      // T1 commits. That is not a duplicate INSERT — it is the hard stop
+      // working as designed, so map it back to already_purchased rather than
+      // letting it surface as a 500.
+      if (isUniqueViolation(err)) return { result: 'already_purchased' };
       if (isFkViolation(err)) return { result: 'not_found' };
       throw err;
     } finally {
@@ -140,5 +147,14 @@ function isFkViolation(err: unknown): boolean {
     err !== null &&
     'code' in err &&
     (err as { code?: unknown }).code === '23503'
+  );
+}
+
+function isUniqueViolation(err: unknown): boolean {
+  return (
+    typeof err === 'object' &&
+    err !== null &&
+    'code' in err &&
+    (err as { code?: unknown }).code === '23505'
   );
 }

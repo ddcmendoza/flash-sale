@@ -158,6 +158,25 @@ describe('POST /api/purchase (sync mode)', () => {
     const duplicates = statuses.filter((r) => r.statusCode === 409);
     expect(purchased).toHaveLength(1);
     expect(duplicates).toHaveLength(39);
+    expect(statuses.every((r) => r.statusCode !== 500)).toBe(true);
+
+    const stock = await readStock(pool, SALE_ID);
+    expect(stock.soldCount).toBe(1);
+    expect(stock.distinctPurchases).toBe(1);
+  });
+
+  it('race: overlapping same-user INSERTs surface as 409, never 500', async () => {
+    // Force real transaction overlap (not just injection serialization) so the
+    // INSERT ... WHERE NOT EXISTS blocks on the unique index and the loser
+    // raises 23505. It must be mapped to already_purchased.
+    const statuses = await Promise.all(
+      Array.from({ length: 60 }, () => buy('hammer')),
+    );
+    const purchased = statuses.filter((r) => r.statusCode === 201);
+    const duplicates = statuses.filter((r) => r.statusCode === 409);
+    expect(purchased).toHaveLength(1);
+    expect(duplicates).toHaveLength(59);
+    expect(statuses.some((r) => r.statusCode === 500)).toBe(false);
 
     const stock = await readStock(pool, SALE_ID);
     expect(stock.soldCount).toBe(1);

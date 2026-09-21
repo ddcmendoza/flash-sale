@@ -15,6 +15,9 @@ Events**; an optional BullMQ queue decouples request rate from database writes
 for scale-out.
 
 ---
+## AI Usage Disclosure
+
+Fully utilized the OpenCode's free model Big Pickle until usage limits is reached, mainly for scaffolding and all the boilerplates, plus writing the documentations. Main architectural decision were given as explicit prompts to the model.
 
 ## Architecture
 

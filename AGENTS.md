@@ -48,6 +48,12 @@ stress/           Locust load-test harness (locustfile.py + Postgres verifier)
    purchase path publishes a fresh frame post-commit and a per-sale reconciler
    ticks from Postgres (~1s) as the convergence safety net; SSE must never be
    the source of truth for a decision.
+7. The **admin surface** (`/api/admin/**` and the `#/admin` SPA page) is a
+   demo-only, unauthenticated management layer for sales CRUD, restock/reset,
+   and purchase inspection. It writes **directly to Postgres** (never through
+   `PurchaseService`), then flushes the sale's advisory Redis keys and pushes a
+   fresh snapshot over the SSE bus so connected clients converge. It is for
+   demo control, not a purchase path — do not gate anything on it.
 
 ## Commands
 
@@ -95,7 +101,9 @@ npm run db:down            # stop containers
   win; N users vs M stock -> exactly M winners; sold_count integrity). The
   multi-sale suite asserts per-sale isolation (a win on sale A doesn't block
   sale B), the catalog, and the SSE stream (frame pushed after a purchase; a
-  window flip reconciled live). Test helpers clean up their sale rows so the
+  window flip reconciled live). The admin suite exercises sales CRUD, the
+  reset/restock endpoint (including Redis repeat-buyer cache invalidation),
+  and catalog cleanup. Test helpers clean up their sale rows so the
   shared dev DB's `/api/sales` catalog stays uncluttered.
 - Locust harness (`stress/locust/`) hits the running HTTP server and
   independently verifies the invariants from Postgres per sale (re-arms the

@@ -154,7 +154,7 @@ sale B — "one item per user" is scoped per sale.
 infra/            docker-compose (postgres + redis) and SQL schema
 packages/shared/  Pure TS package: sale-window resolver + API contract types
 apps/server/      Fastify API (business logic, repository layer, optional BullMQ queue)
-apps/web/         React 19 + Vite SPA
+apps/web/         React 19 + Vite SPA (sale selector + `#/admin` management page)
 stress/           Locust load-test harness (locustfile + Postgres verifier)
 ```
 
@@ -218,6 +218,27 @@ so the same user can buy once in every sale.
 | GET    | `/api/purchases/:userId` *(legacy)* | Status of the default sale for a user |
 | GET    | `/healthz` | Liveness probe |
 
+### Admin surface (demo)
+
+An unauthenticated, demo-only management UI and API for running the show — no
+load testing, no guarantees, just DB-driven control. It writes directly to
+Postgres (never through the purchase service), then flushes the sale's
+advisory Redis keys and pushes a fresh snapshot over the SSE bus so any open
+client converges immediately.
+
+| Method | Path | Description |
+| ------ | ---- | ----------- |
+| GET    | `/api/admin/sales` | Every sale with counters: sold, remaining, purchase count, status |
+| POST   | `/api/admin/sales` | Create a sale (`id` optional; window must be end > start) |
+| PATCH  | `/api/admin/sales/:saleId` | Partial update (name, price, quantity, window) |
+| POST   | `/api/admin/sales/:saleId/reset` | Wipe purchases + restore stock (re-arms window) |
+| DELETE | `/api/admin/sales/:saleId` | Delete a sale (purchases cascade) |
+| GET    | `/api/admin/sales/:saleId/purchases` | Purchase rows for a sale |
+
+The web SPA hosts the matching page at `#/admin` (linked from the demo
+header): a create/edit form, a full sales table with per-sale progress,
+one-click reset, purchase inspection, and delete with confirmation.
+
 ### Multi-sale seeding
 
 `npm run db:migrate` seeds **three** demo sales out of the box —
@@ -256,7 +277,8 @@ npm run lint      # ESLint (flat config)
   Postgres/Redis. Race suites assert the invariants under concurrency: 40
   parallel attempts by one user → exactly one win; 100 users vs stock 50 →
   exactly 50 winners; N users vs stock N → everyone wins once and
-  `sold_count == distinct purchases` everywhere.
+  `sold_count == distinct purchases` everywhere. The admin suite drives the
+  full CRUD/reset/delete surface and verifies catalog cleanup.
 
 ## Load testing (Locust)
 

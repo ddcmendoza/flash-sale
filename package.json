@@ -6,8 +6,7 @@
   "type": "module",
   "workspaces": [
     "packages/*",
-    "apps/*",
-    "stress"
+    "apps/*"
   ],
   "scripts": {
     "db:up": "docker compose -f infra/docker-compose.yml up -d",
@@ -22,7 +21,7 @@
     "test:watch": "npm run test:watch -w @flash-sale/server",
     "typecheck": "npm run typecheck --workspaces --if-present",
     "lint": "eslint .",
-    "stress": "npm run stress -w stress"
+    "stress": "sh stress/locust/run.sh"
   },
   "devDependencies": {
     "@eslint/js": "^9.17.0",

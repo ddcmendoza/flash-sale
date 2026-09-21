@@ -11,6 +11,7 @@ import {
   fetchSales,
   saleEventsUrl,
 } from './api';
+import { AdminPage } from './AdminPage';
 import './app.css';
 
 type StatusBadge = 'upcoming' | 'active' | 'sold_out' | 'ended';
@@ -54,6 +55,16 @@ function formatMoney(priceCents: number): string {
   return `$${(priceCents / 100).toFixed(2)}`;
 }
 
+function useHashRoute(): string {
+  const [route, setRoute] = useState<string>(() => window.location.hash);
+  useEffect(() => {
+    const onChange = (): void => setRoute(window.location.hash);
+    window.addEventListener('hashchange', onChange);
+    return () => window.removeEventListener('hashchange', onChange);
+  }, []);
+  return route;
+}
+
 export function App() {
   const [sales, setSales] = useState<SaleSnapshot[]>([]);
   const [selectedSaleId, setSelectedSaleId] = useState<string | null>(null);
@@ -68,6 +79,8 @@ export function App() {
   const [checkedUserId, setCheckedUserId] = useState<string | null>(null);
   const [now, setNow] = useState<number>(Date.now());
   const [checkedSaleId, setCheckedSaleId] = useState<string | null>(null);
+
+  const route = useHashRoute();
 
   useEffect(() => {
     void fetchSales()
@@ -188,11 +201,18 @@ export function App() {
   const statusMatches =
     myStatus && checkedUserId && checkedSaleId === selectedSaleId;
 
+  if (route.startsWith('#/admin')) {
+    return <AdminPage />;
+  }
+
   return (
     <main className="shell">
       <header>
         <h1>Flash Drop</h1>
         <p className="tagline">Multiple drops. Limited stock each. One per person.</p>
+        <a className="admin-link" href="#/admin">
+          Admin
+        </a>
       </header>
 
       {sales.length > 0 && (

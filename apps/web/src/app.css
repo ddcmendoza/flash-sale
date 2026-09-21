@@ -186,7 +186,10 @@ label {
 }
 
 input[type='text'],
-input:not([type]) {
+input:not([type]),
+input[type='datetime-local'],
+input[type='number'],
+input[type='date'] {
   flex: 1;
   min-width: 0;
   padding: 10px 12px;
@@ -195,6 +198,7 @@ input:not([type]) {
   border-radius: 8px;
   color: var(--text);
   font-size: 0.95rem;
+  font-family: inherit;
 }
 
 button {
@@ -260,4 +264,140 @@ footer {
   color: var(--muted);
   font-size: 0.78rem;
   text-align: center;
+}
+
+/* ---- Admin page ---- */
+
+.admin {
+  max-width: 1120px;
+}
+
+.admin-title-row {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+.admin-link {
+  color: var(--accent);
+  font-size: 0.85rem;
+  text-decoration: none;
+  border: 1px solid var(--border);
+  padding: 6px 12px;
+  border-radius: 999px;
+  background: var(--panel);
+}
+
+.admin-form {
+  margin-bottom: 20px;
+}
+
+.admin-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  gap: 14px;
+  margin: 16px 0;
+}
+
+.admin-grid label {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  min-width: 0;
+}
+
+.admin-grid label input {
+  width: 100%;
+}
+
+.admin-form .row button.primary,
+.admin-form .row {
+  align-items: center;
+}
+
+.admin-form .row .primary {
+  margin: 0;
+}
+
+.muted {
+  color: var(--muted);
+  font-size: 0.85rem;
+}
+
+.mono {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 0.8rem;
+}
+
+.table-wrap {
+  overflow-x: auto;
+  margin-top: 12px;
+}
+
+.admin-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.85rem;
+}
+
+.admin-table th,
+.admin-table td {
+  text-align: left;
+  padding: 10px 12px;
+  border-bottom: 1px solid var(--border);
+  vertical-align: top;
+}
+
+.admin-table th {
+  color: var(--muted);
+  font-weight: 600;
+  font-size: 0.72rem;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+}
+
+.admin-table .stock {
+  margin: 0;
+  min-width: 110px;
+}
+
+.admin-table .stock.mini .bar {
+  height: 6px;
+}
+
+.admin-table .window {
+  white-space: nowrap;
+  color: var(--muted);
+}
+
+.admin-table td .badge {
+  margin-right: 4px;
+}
+
+.admin-table td .muted {
+  display: block;
+  margin-top: 4px;
+}
+
+.admin-table .actions {
+  flex-wrap: nowrap;
+  align-items: center;
+}
+
+.admin-table button.ghost,
+.admin-table button.danger {
+  margin: 0;
+  padding: 6px 10px;
+  font-size: 0.75rem;
+  width: auto;
+  white-space: nowrap;
+}
+
+.admin-table button.danger {
+  background: transparent;
+  color: var(--red);
+  border: 1px solid var(--border);
+  font-weight: 600;
 }

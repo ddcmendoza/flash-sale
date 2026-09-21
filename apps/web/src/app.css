@@ -39,6 +39,43 @@ header h1 {
   margin: 4px 0 28px;
 }
 
+.sale-list {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin-bottom: 16px;
+}
+
+.sale-chip {
+  padding: 8px 12px;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  color: var(--text);
+  border-radius: 999px;
+  font-weight: 600;
+  font-size: 0.85rem;
+  display: inline-flex;
+  align-items: baseline;
+  gap: 8px;
+}
+
+.sale-chip-active {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+.sale-chip-stock {
+  color: var(--muted);
+  font-size: 0.75rem;
+  font-variant-numeric: tabular-nums;
+}
+
+.conn {
+  color: var(--green);
+  font-size: 0.78rem;
+  font-variant-numeric: tabular-nums;
+}
+
 .card {
   background: var(--panel);
   border: 1px solid var(--border);

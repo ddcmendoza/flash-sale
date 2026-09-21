@@ -20,7 +20,7 @@ infra/            docker-compose (postgres + redis) and SQL schema
 packages/shared/  Pure TS package: sale-window resolver + API contract types
 apps/server/      Fastify API (business logic, repository layer, optional BullMQ queue)
 apps/web/         React 19 + Vite SPA
-stress/           Standalone load-test harness that asserts the invariants
+stress/           Locust load-test harness (locustfile.py + Postgres verifier)
 ```
 
 ## Golden rules (do not violate)
@@ -50,7 +50,7 @@ npm run dev:web            # Vite React SPA on :5173 (proxies /api -> :3000)
 npm run test               # unit + integration tests (needs db:up + migrate)
 npm run typecheck          # tsc --noEmit across all workspaces
 npm run lint               # ESLint (flat config)
-npm run stress             # load test harness; see README.md for expectations
+npm run stress             # Locust load harness (cd stress/locust && locust); see README.md
 npm run db:down            # stop containers
 ```
 
@@ -81,8 +81,9 @@ npm run db:down            # stop containers
 - Integration tests (`apps/server/test/integration`): real Fastify + real
   Postgres/Redis. Race suites assert the invariants (parallel same-user -> one
   win; N users vs M stock -> exactly M winners; sold_count integrity).
-- Stress harness (`stress/`) hits the running HTTP server and independently
-  verifies stock integrity from Postgres.
+- Locust harness (`stress/locust/`) hits the running HTTP server and
+  independently verifies the invariants from Postgres (re-arms the sale on
+  start, verifies on stop).
 
 ## Ports
 

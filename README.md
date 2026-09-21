@@ -124,7 +124,7 @@ infra/            docker-compose (postgres + redis) and SQL schema
 packages/shared/  Pure TS package: sale-window resolver + API contract types
 apps/server/      Fastify API (business logic, repository layer, optional BullMQ queue)
 apps/web/         React 19 + Vite SPA
-stress/           Standalone load-test harness that asserts the invariants
+stress/           Locust load-test harness (locustfile + Postgres verifier)
 ```
 
 ## Stack
@@ -135,7 +135,7 @@ stress/           Standalone load-test harness that asserts the invariants
 | Data     | Postgres 16 (source of truth), Redis 7 (advisory cache), BullMQ 5 (optional queue) |
 | Web      | React 19, Vite 7 |
 | Language | TypeScript (strict, `verbatimModuleSyntax`, ESM), runs via `tsx` |
-| Tests    | Vitest (unit + integration), standalone stress harness |
+| Tests    | Vitest (unit + integration), Locust load harness |
 
 Money is integer cents (`price_cents`). All purchase writes go through one
 transaction; there is no alternate write path.
@@ -213,22 +213,50 @@ npm run lint      # ESLint (flat config)
   exactly 50 winners; N users vs stock N → everyone wins once and
   `sold_count == distinct purchases` everywhere.
 
-## Stress harness
+## Load testing (Locust)
 
 ```bash
-npm run stress
+cd stress/locust
+python3 -m venv .venv && .venv/bin/pip install -r requirements.txt
+npm run stress -s -- -u 2000 --spawn-rate 500 -t 60s --headless
 ```
 
-`stress/` is a standalone harness that hits the running HTTP server and
-**independently verifies the invariants from Postgres** (it never trusts the
-HTTP responses). Defaults: 10,000 attempts, 200 concurrent workers, stock
-1,000 — the sale is reset to a clean state before each run.
+`stress/locust/` is a **Locust**-based load harness. The Locust CLI is the
+entire load-shaping surface — *different kinds of load are just flags*:
 
 ```bash
-STRESS_ATTEMPTS=20000 STRESS_CONCURRENCY=500 npm run stress
+# instant burst: 2,000 vusers all spawn immediately, hammer for 60s
+.venv/bin/locust -f locustfile.py -H http://localhost:3000 -u 2000 --spawn-rate 2000 -t 60s --headless
+
+# ramp / soak: slow spawn climbs concurrency gradually, then holds it
+.venv/bin/locust -f locustfile.py -H http://localhost:3000 -u 1000 --spawn-rate 10 -t 10m --headless
+
+# repeat-buyer flood: 200 vusers share a pool of 50 ids, so the same user
+# hammers concurrently (exercises the UNIQUE constraint + Redis 409 path)
+STRESS_USER_SCHEME=flood STRESS_FLOOD_USERS=50 \
+  .venv/bin/locust -f locustfile.py -H http://localhost:3000 -u 200 --spawn-rate 50 -t 30s --headless
+
+# interactive dashboards: charts, live percentiles, failure explorer
+.venv/bin/locust -f locustfile.py -H http://localhost:3000 -u 200 --spawn-rate 50
 ```
 
-It reports a result histogram, throughput, latency percentiles (p50/p95/p99),
-and the Postgres ground-truth comparison (`sold_count` vs distinct purchase
-rows vs `total_quantity`), failing hard on any oversell or mismatch. In queue
-mode it additionally waits for workers to flush before verifying.
+Each run is self-contained: on start the sale is **re-armed** (purchases
+wiped, `sold_count` zeroed, stock re-seeded, active window set, Redis fast-path
+flushed), so it never depends on a stale seed. On stop it **verifies the three
+invariants straight from Postgres** and exits non-zero on any violation:
+
+- `sold_count == purchase rows` (one committed row per sale)
+- `sold_count <= total_quantity` (no oversell — catches `OVERSOLD`)
+- `distinct winners == sold_count`, and the count matches the expected winners
+  (`min(users, stock)` for unique ids, `min(pool size, stock)` for flood)
+
+`verify.py` is the same Postgres ground-truth check standalone, for post-hoc
+runs (e.g. in CI after a headless run). Behavior is tuned via env vars:
+`STRESS_USER_SCHEME` (`unique` per-vuser id or `flood` pooled ids),
+`STRESS_FLOOD_USERS`, `SALE_TOTAL_QUANTITY` (stock), `STRESS_WINDOW_MINUTES`
+(active window length), `SALE_ID`, `DATABASE_URL`, `REDIS_URL`. The old TS
+`stress/` harness was replaced by this; the Postgres invariants it enforced
+live on in the Locust hooks.
+
+`npm run stress` is a thin alias: `cd stress/locust && locust` (pass flags
+after `--`).

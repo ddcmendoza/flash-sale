@@ -11,7 +11,8 @@ export interface PurchaseRouteOptions {
 }
 
 /**
- * POST /api/purchase  { userId }
+ * POST /api/purchase                     (legacy alias → default sale)
+ * POST /api/sales/:saleId/purchase       { userId }
  *
  * Fast lane (Redis, advisory only): reject finished/upcoming sales in <1ms and
  * repeat buyers instantly. Slow lane (Postgres, authoritative): one
@@ -22,66 +23,78 @@ export async function purchaseRoutes(
   fastify: FastifyInstance,
   opts: PurchaseRouteOptions,
 ): Promise<void> {
+  fastify.post('/api/sales/:saleId/purchase', async (request, reply) => {
+    const { saleId } = request.params as { saleId: string };
+    return handlePurchase(fastify, opts.purchaseMode, saleId, request, reply);
+  });
+
   fastify.post('/api/purchase', async (request, reply) => {
-    const body = request.body as PurchaseBody | null;
-    const userId = body?.userId;
-
-    if (typeof userId !== 'string' || userId.trim().length === 0) {
-      return reply
-        .code(400)
-        .send(errorBody('invalid_user', 'userId is required and must be a string'));
-    }
-
-    // --- Redis fast-path: instant rejects for repeat buyers ---
-    const purchased = await fastify.purchaseGate.alreadyPurchased(userId);
-    if (purchased) {
-      return reply
-        .code(409)
-        .send(errorBody('already_purchased', 'You already purchased this item'));
-    }
-
-    // --- Redis fast-path: advisory sale-state pre-check ---
-    const status = await fastify.purchaseGate.peekSaleStatus();
-    if (status === 'upcoming') {
-      return reply
-        .code(425)
-        .send(errorBody('upcoming', 'The sale has not started yet'));
-    }
-    if (status === 'sold_out' || status === 'ended') {
-      return reply
-        .code(410)
-        .send(
-          errorBody(status, status === 'sold_out' ? 'Sold out' : 'The sale has ended'),
-        );
-    }
-
-    if (opts.purchaseMode === 'queue') {
-      const outcome = await enqueuePurchase(fastify, userId);
-      return reply.code(202).send(outcome);
-    }
-
-    const outcome: PurchaseOutcome = await fastify.purchaseService.attempt(userId);
-    if (outcome.result === 'purchased') {
-      // Best-effort fast-path cache; the DB row is what counts.
-      await fastify.purchaseGate.markPurchased(userId).catch(() => {});
-    }
-    return reply.code(codeFor(outcome)).send(bodyFor(outcome));
+    return handlePurchase(fastify, opts.purchaseMode, fastify.defaultSaleId, request, reply);
   });
 }
 
-async function enqueuePurchase(
+async function handlePurchase(
   fastify: FastifyInstance,
-  userId: string,
-): Promise<PurchaseResponse> {
-  const attemptId = await fastify.purchaseProducer.enqueue(
-    fastify.saleId,
-    userId,
-  );
-  return {
-    result: 'accepted',
-    attemptId,
-    message: 'Purchase request accepted; check purchase status shortly',
-  };
+  purchaseMode: 'sync' | 'queue',
+  saleId: string,
+  request: { body?: unknown },
+  reply: {
+    code(statusCode: number): {
+      send(payload: unknown): unknown;
+    };
+    send(payload: unknown): unknown;
+  },
+) {
+  const body = request.body as PurchaseBody | null;
+  const userId = body?.userId;
+
+  if (typeof userId !== 'string' || userId.trim().length === 0) {
+    return reply
+      .code(400)
+      .send(errorBody('invalid_user', 'userId is required and must be a string'));
+  }
+
+  // --- Redis fast-path: instant rejects for repeat buyers ---
+  const purchased = await fastify.purchaseGate.alreadyPurchased(saleId, userId);
+  if (purchased) {
+    return reply
+      .code(409)
+      .send(errorBody('already_purchased', 'You already purchased this item'));
+  }
+
+  // --- Redis fast-path: advisory sale-state pre-check ---
+  const status = await fastify.purchaseGate.peekSaleStatus(saleId);
+  if (status === 'upcoming') {
+    return reply
+      .code(425)
+      .send(errorBody('upcoming', 'The sale has not started yet'));
+  }
+  if (status === 'sold_out' || status === 'ended') {
+    return reply
+      .code(410)
+      .send(
+        errorBody(status, status === 'sold_out' ? 'Sold out' : 'The sale has ended'),
+      );
+  }
+
+  if (purchaseMode === 'queue') {
+    const attemptId = await fastify.purchaseProducer.enqueue(saleId, userId);
+    const accepted: PurchaseResponse = {
+      result: 'accepted',
+      attemptId,
+      message: 'Purchase request accepted; check purchase status shortly',
+    };
+    return reply.code(202).send(accepted);
+  }
+
+  const outcome: PurchaseOutcome = await fastify.purchaseService.attempt(saleId, userId);
+  if (outcome.result === 'purchased') {
+    // Best-effort fast-path cache; the DB row is what counts.
+    await fastify.purchaseGate.markPurchased(saleId, userId).catch(() => {});
+    // Push the fresh snapshot over SSE immediately (fire-and-forget).
+    fastify.liveStatusBroadcaster.publishStatus(saleId);
+  }
+  return reply.code(codeFor(outcome)).send(bodyFor(outcome));
 }
 
 function errorBody(result: PurchaseResponse['result'], message: string): PurchaseResponse {

@@ -9,13 +9,16 @@ import { pgPlugin } from './plugins/pg';
 import { redisPlugin } from './plugins/redis';
 import { servicesPlugin } from './plugins/services';
 import { healthRoutes } from './routes/health';
+import { salesRoutes } from './routes/sales';
 import { saleStatusRoutes } from './routes/saleStatus';
+import { statusEventRoutes } from './routes/events';
 import { purchaseRoutes } from './routes/purchase';
 import { purchasesRoutes } from './routes/purchases';
 import { SalesRepo } from './repos/sales';
 import { PurchasesRepo } from './repos/purchases';
 import { PurchaseService } from './services/purchaseService';
 import { SaleStatusService, PurchaseGate } from './services/saleStatusService';
+import { LiveBus, LiveStatusBroadcaster } from './services/liveStatus';
 import {
   BullPurchaseProducer,
   createPurchaseQueue,
@@ -27,6 +30,7 @@ import {
 } from './queue/worker';
 
 export interface BuildAppOptions {
+  /** Default sale for the legacy single-sale route aliases. */
   saleId?: string;
   purchaseMode?: PurchaseMode;
   /** Inject for tests / custom pools. When omitted, built from config. */
@@ -68,9 +72,18 @@ export function buildApp(opts: BuildAppOptions = {}): BuiltApp {
   const salesRepo = new SalesRepo(pool);
   const purchasesRepo = new PurchasesRepo(pool);
   const now = opts.now ?? (() => new Date());
-  const saleStatusService = new SaleStatusService(salesRepo, redis, cfg.saleId);
-  const purchaseGate = new PurchaseGate(redis, saleStatusService, cfg.saleId);
-  const purchaseService = new PurchaseService(pool, cfg.saleId, now);
+  const saleStatusService = new SaleStatusService(salesRepo, redis);
+  const purchaseGate = new PurchaseGate(redis, saleStatusService);
+  const purchaseService = new PurchaseService(pool, now);
+
+  // Live SSE fan-out. The subscriber needs its own connection (a connection in
+  // subscribe mode can't issue commands); the main `redis` connection doubles
+  // as the publisher. Best effort — a Redis blip degrades live push, never
+  // correctness.
+  const liveSubRedis = redis.duplicate();
+  const liveBus = new LiveBus(redis, liveSubRedis);
+  const liveStatusBroadcaster = new LiveStatusBroadcaster(liveBus, saleStatusService);
+  void liveBus.start();
 
   // Queue wiring. In sync mode a stub producer is decorated so the single
   // route code path stays simple; a real BullMQ queue/Redis only exists when
@@ -88,7 +101,6 @@ export function buildApp(opts: BuildAppOptions = {}): BuiltApp {
     producer = new BullPurchaseProducer(queue);
     worker = startPurchaseWorker({
       connection: workerRedis,
-      saleId: cfg.saleId,
       purchaseService,
       gate: purchaseGate,
     });
@@ -101,20 +113,28 @@ export function buildApp(opts: BuildAppOptions = {}): BuiltApp {
   }
 
   app.register(servicesPlugin, {
-    saleId: cfg.saleId,
+    defaultSaleId: cfg.saleId,
+    salesRepo,
     purchaseService,
     saleStatusService,
     purchaseGate,
     purchasesRepo,
     purchaseProducer: producer,
+    liveBus,
+    liveStatusBroadcaster,
   });
 
   app.register(healthRoutes);
+  app.register(salesRoutes);
   app.register(saleStatusRoutes);
+  app.register(statusEventRoutes);
   app.register(purchaseRoutes, { purchaseMode: cfg.purchaseMode });
   app.register(purchasesRoutes);
 
   app.addHook('onClose', async () => {
+    liveStatusBroadcaster.stop();
+    await liveSubRedis.punsubscribe().catch(() => {});
+    await liveSubRedis.quit().catch(() => {});
     await worker?.close();
     await queue?.close();
     await queueRedis?.quit();

@@ -35,6 +35,14 @@ export class SalesRepo {
     return row ? toSnapshot(row) : null;
   }
 
+  /** All sales, for the catalog/list endpoint. */
+  async findAll(): Promise<SaleSnapshot[]> {
+    const { rows } = await this.db.query<SaleRow>(
+      'SELECT * FROM sales ORDER BY start_at, id',
+    );
+    return rows.map(toSnapshot);
+  }
+
   /** Read within an open transaction (used for error classification). */
   async findByIdTx(client: PoolClient, id: string): Promise<SaleSnapshot | null> {
     const { rows } = await client.query<SaleRow>(

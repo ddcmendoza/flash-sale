@@ -26,17 +26,17 @@ const MAX_USER_ID_LENGTH = 255;
  *      re-evaluates the predicate against the latest committed row, so at most
  *      `total_quantity` UPDATEs ever match.
  *
- * Redis is never consulted here. Callers may add a Redis fast-path in front,
- * but this service always decides.
+ * The sale is addressed per call (`attempt(saleId, userId)`), so one service
+ * instance serves every sale. Redis is never consulted here. Callers may add a
+ * Redis fast-path in front, but this service always decides.
  */
 export class PurchaseService {
   constructor(
     private readonly pool: Pool,
-    private readonly saleId: string,
     private readonly now: () => Date = () => new Date(),
   ) {}
 
-  async attempt(userId: string): Promise<PurchaseOutcome> {
+  async attempt(saleId: string, userId: string): Promise<PurchaseOutcome> {
     const user = normalizeUserId(userId);
     if (user === null) return { result: 'invalid_user' };
 
@@ -51,7 +51,7 @@ export class PurchaseService {
            SELECT 1 FROM purchases WHERE sale_id = $1 AND user_id = $2
          )
          RETURNING id`,
-        [this.saleId, user],
+        [saleId, user],
       );
 
       if ((inserted.rowCount ?? 0) === 0) {
@@ -68,12 +68,12 @@ export class PurchaseService {
             AND start_at <= now()
             AND end_at >= now()
           RETURNING sold_count`,
-        [this.saleId],
+        [saleId],
       );
 
       if ((sold.rowCount ?? 0) === 0) {
         await client.query('ROLLBACK');
-        const sale = await this.findByIdTx(client);
+        const sale = await this.findByIdTx(client, saleId);
         return this.classifyWindowFailure(sale);
       }
 
@@ -96,7 +96,10 @@ export class PurchaseService {
     }
   }
 
-  private async findByIdTx(client: PoolClient): Promise<SaleSnapshot | null> {
+  private async findByIdTx(
+    client: PoolClient,
+    saleId: string,
+  ): Promise<SaleSnapshot | null> {
     const { rows } = await client.query<{
       id: string;
       name: string;
@@ -105,7 +108,7 @@ export class PurchaseService {
       sold_count: number;
       start_at: Date;
       end_at: Date;
-    }>('SELECT * FROM sales WHERE id = $1', [this.saleId]);
+    }>('SELECT * FROM sales WHERE id = $1', [saleId]);
     const row = rows[0];
     if (!row) return null;
     return {

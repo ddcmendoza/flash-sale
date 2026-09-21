@@ -1,6 +1,10 @@
 import type { Redis } from 'ioredis';
-import type { SaleStatusResponse, SaleSnapshot, SaleStatus } from '@flash-sale/shared';
-import { resolveSaleStatus, remaining } from '@flash-sale/shared';
+import type {
+  SaleSnapshot,
+  SaleStatus,
+  SaleStatusResponse,
+} from '@flash-sale/shared';
+import { remaining, resolveSaleStatus } from '@flash-sale/shared';
 import type { SalesRepo } from '../repos/sales';
 
 const STATUS_CACHE_TTL_SECONDS = 1;
@@ -16,34 +20,44 @@ function purchasedCacheKey(saleId: string, userId: string): string {
 /**
  * Slow lane: sale status is computed from Postgres and cached in Redis for 1s.
  * The cache is advisory — the authoritative window/stock check happens inside
- * the purchase transaction against PG `now()`.
+ * the purchase transaction against PG `now()`. All methods take the saleId, so
+ * one service instance serves every sale.
  */
 export class SaleStatusService {
   constructor(
     private readonly sales: SalesRepo,
     private readonly redis: Redis,
-    private readonly saleId: string,
   ) {}
 
-  async getStatus(): Promise<SaleStatusResponse | null> {
-    const cached = await this.readCache();
+  async getStatus(saleId: string): Promise<SaleStatusResponse | null> {
+    const cached = await this.readCache(saleId);
     if (cached) return cached;
 
-    const sale = await this.sales.findById(this.saleId);
+    const sale = await this.sales.findById(saleId);
     if (!sale) return null;
 
     const response = this.render(sale);
-    await this.writeCache(response).catch(() => {});
+    await this.writeCache(saleId, response).catch(() => {});
     return response;
   }
 
-  async getStatusDirect(sale: SaleSnapshot, now: Date): Promise<SaleStatusResponse> {
+  /** Fresh read straight from Postgres that also refreshes the cache. Used to
+   * push an up-to-date snapshot right after a purchase commits. */
+  async getStatusFresh(saleId: string): Promise<SaleStatusResponse | null> {
+    const sale = await this.sales.findById(saleId);
+    if (!sale) return null;
+    const response = this.render(sale);
+    await this.writeCache(saleId, response).catch(() => {});
+    return response;
+  }
+
+  getStatusDirect(sale: SaleSnapshot, now: Date): SaleStatusResponse {
     return this.render(sale, now);
   }
 
   /** Fast-path read used by the purchase gate. Never authoritative. */
-  async peekStatus(): Promise<SaleStatus | null> {
-    const cached = await this.readCache();
+  async peekStatus(saleId: string): Promise<SaleStatus | null> {
+    const cached = await this.readCache(saleId);
     return cached ? cached.status : null;
   }
 
@@ -61,8 +75,8 @@ export class SaleStatusService {
     };
   }
 
-  private async readCache(): Promise<SaleStatusResponse | null> {
-    const raw = await this.redis.get(statusCacheKey(this.saleId)).catch(() => null);
+  private async readCache(saleId: string): Promise<SaleStatusResponse | null> {
+    const raw = await this.redis.get(statusCacheKey(saleId)).catch(() => null);
     if (!raw) return null;
     try {
       return JSON.parse(raw) as SaleStatusResponse;
@@ -71,9 +85,12 @@ export class SaleStatusService {
     }
   }
 
-  private async writeCache(response: SaleStatusResponse): Promise<void> {
+  private async writeCache(
+    saleId: string,
+    response: SaleStatusResponse,
+  ): Promise<void> {
     await this.redis.set(
-      statusCacheKey(this.saleId),
+      statusCacheKey(saleId),
       JSON.stringify(response),
       'EX',
       STATUS_CACHE_TTL_SECONDS,
@@ -86,25 +103,26 @@ export class PurchaseGate {
   constructor(
     private readonly redis: Redis,
     private readonly status: SaleStatusService,
-    private readonly saleId: string,
   ) {}
 
   /** True => this user has a committed purchase (safe; set post-commit). */
-  async alreadyPurchased(userId: string): Promise<boolean> {
+  async alreadyPurchased(saleId: string, userId: string): Promise<boolean> {
     const hit = await this.redis
-      .exists(purchasedCacheKey(this.saleId, userId))
+      .exists(purchasedCacheKey(saleId, userId))
       .catch(() => 0);
     return hit === 1;
   }
 
   /** Mark a just-committed purchase. Best-effort; never gating, never awaited
    * by callers that must respond fast. */
-  async markPurchased(userId: string): Promise<void> {
-    await this.redis.set(purchasedCacheKey(this.saleId, userId), '1').catch(() => {});
+  async markPurchased(saleId: string, userId: string): Promise<void> {
+    await this.redis
+      .set(purchasedCacheKey(saleId, userId), '1')
+      .catch(() => {});
   }
 
   /** Advisory sale-state pre-check. `null` = unknown, caller should go to PG. */
-  async peekSaleStatus(): Promise<SaleStatus | null> {
-    return this.status.peekStatus();
+  async peekSaleStatus(saleId: string): Promise<SaleStatus | null> {
+    return this.status.peekStatus(saleId);
   }
 }

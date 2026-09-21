@@ -1,5 +1,9 @@
 export type SaleStatus = 'upcoming' | 'active' | 'sold_out' | 'ended';
 
+export interface SalesListResponse {
+  sales: SaleSnapshot[];
+}
+
 export interface SaleSnapshot {
   id: string;
   name: string;

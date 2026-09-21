@@ -1,4 +1,4 @@
-import { beforeAll, describe, expect, it } from 'vitest';
+import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import type { SaleStatusResponse } from '@flash-sale/shared';
 import { buildApp } from '../../src/app';
 import {
@@ -6,6 +6,7 @@ import {
   createTestRedis,
   resetSale,
   clearRedisKeysForSale,
+  deleteSale,
 } from '../helpers/testDb';
 import type { Pool } from 'pg';
 import type { Redis } from 'ioredis';
@@ -13,15 +14,25 @@ import type { Redis } from 'ioredis';
 describe('GET /api/sale/status', () => {
   let pool: Pool;
   let redis: Redis;
+  const created: string[] = [];
 
   beforeAll(() => {
     pool = createTestPool();
     redis = createTestRedis();
   });
 
+  afterAll(async () => {
+    for (const saleId of created) {
+      await deleteSale(pool, saleId);
+    }
+    await pool.end();
+    await redis.quit();
+  });
+
   async function statusFor(
     saleId: string,
   ): Promise<{ code: number; body: SaleStatusResponse }> {
+    created.push(saleId);
     const { app } = buildApp({ saleId, pool, redis });
     try {
       const res = await app.inject({ method: 'GET', url: '/api/sale/status' });
@@ -52,6 +63,7 @@ describe('GET /api/sale/status', () => {
 
   it('reports sold_out when stock is exhausted inside the window', async () => {
     const saleId = await resetSale(pool, { totalQuantity: 3 });
+    created.push(saleId);
     const { app } = buildApp({ saleId, pool, redis });
     try {
       for (const user of ['a', 'b', 'c']) {
@@ -82,6 +94,7 @@ describe('GET /api/sale/status', () => {
 
   it('reflects stock that is currently reserved', async () => {
     const saleId = await resetSale(pool, { totalQuantity: 10 });
+    created.push(saleId);
     const { app } = buildApp({ saleId, pool, redis });
     try {
       await app.inject({

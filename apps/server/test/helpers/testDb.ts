@@ -63,6 +63,13 @@ export async function clearRedisKeysForSale(redis: Redis, saleId: string): Promi
   if (keys.length > 0) await redis.del(keys);
 }
 
+/** Remove a sale and its purchases. Use in test teardowns so random sale ids
+ * don't accumulate in the shared dev database (they show up in GET /api/sales). */
+export async function deleteSale(pool: Pool, saleId: string): Promise<void> {
+  await pool.query('DELETE FROM purchases WHERE sale_id = $1', [saleId]);
+  await pool.query('DELETE FROM sales WHERE id = $1', [saleId]);
+}
+
 export interface StockSummary {
   soldCount: number;
   totalQuantity: number;

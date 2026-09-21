@@ -7,6 +7,7 @@ import {
   resetSale,
   clearRedisKeysForSale,
   readStock,
+  deleteSale,
 } from '../helpers/testDb';
 import type { Pool } from 'pg';
 import type { Redis } from 'ioredis';
@@ -38,6 +39,7 @@ describe('POST /api/purchase (sync mode)', () => {
 
   afterAll(async () => {
     await app.close();
+    await deleteSale(pool, SALE_ID);
     await pool.end();
     await redis.quit();
   });

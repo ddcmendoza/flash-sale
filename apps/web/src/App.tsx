@@ -2,6 +2,8 @@ import { Route, Routes } from 'react-router';
 import { AdminPage } from './pages/AdminPage';
 import { DemoPage } from './pages/DemoPage';
 import { NotFoundPage } from './pages/NotFoundPage';
+import * as _ from './app.css'
+
 
 export function App() {
   return (

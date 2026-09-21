@@ -1,0 +1,234 @@
+# Flash Sale
+
+A high-throughput **flash sale** demo for a single product with limited stock.
+The system must enforce three invariants even under a flood of concurrent
+purchase attempts:
+
+- **No overselling** — stock is finite and never goes negative.
+- **One item per user** — a user can never win twice.
+- **Sale window** — the active start/end period is enforced, including at the
+  boundaries.
+
+It uses Postgres as the **sole source of truth**, with a Redis fast-path in
+front that is strictly advisory. An optional BullMQ queue decouples request
+rate from database writes for scale-out.
+
+---
+
+## Architecture
+
+```mermaid
+flowchart LR
+    subgraph Client
+        WEB[React 19 + Vite SPA :5173]
+        STRESS[Stress harness]
+    end
+
+    subgraph API[Fastify API :3000]
+        ROUTER[Routes /api/sale/status, /api/purchase, /api/purchases/:userId]
+
+        GATE[PurchaseGate<br/>Redis fast-path<br/>advisory only]
+        SVC[PurchaseService.attempt<br/>single PG transaction]
+        STATUS[SaleStatusService<br/>1s Redis cache]
+
+        MODE{Mode}
+        PROD[BullMQ producer]
+        WORKER[BullMQ worker<br/>concurrency 16]
+    end
+
+    REDIS[(Redis :6379<br/>advisory cache)]
+    PG[(Postgres :5433<br/>source of truth)]
+
+    WEB -->|proxy /api| ROUTER
+    STRESS --> ROUTER
+
+    ROUTER --> GATE
+    GATE --> REDIS
+    ROUTER --> STATUS --> REDIS
+    ROUTER --> MODE
+    MODE -->|sync| SVC
+    MODE -->|queue| PROD --> REDIS --> WORKER
+    WORKER --> SVC
+
+    SVC --> PG
+    STATUS --> PG
+```
+
+The core idea is a **two-speed system**: cheap, imperfect checks up front
+(Redis) and one authoritative decision on every purchase (Postgres).
+
+### The purchase transaction
+
+Every purchase write funnels through `PurchaseService.attempt()`
+(`apps/server/src/services/purchaseService.ts`): `BEGIN`, then two statements,
+then `COMMIT`:
+
+```sql
+-- 1. Reserve the user's slot — the UNIQUE(sale_id, user_id) constraint is the
+--    hard stop for duplicates. Concurrent INSERTs block on the index, then
+--    re-check NOT EXISTS against the committed row and insert nothing.
+INSERT INTO purchases (sale_id, user_id)
+SELECT $1::text, $2::text
+WHERE NOT EXISTS (
+  SELECT 1 FROM purchases WHERE sale_id = $1 AND user_id = $2
+)
+RETURNING id;
+
+-- 2. Atomically claim one unit, only while stock remains AND the window is
+--    active (checked against Postgres now(), never the client clock).
+--    Concurrent sellers serialize on the row lock; each re-evaluates the
+--    predicate against the latest committed row, so at most total_quantity
+--    UPDATEs ever match — overselling is impossible.
+UPDATE sales
+   SET sold_count = sold_count + 1,
+       updated_at = now()
+ WHERE id = $1
+   AND sold_count < total_quantity
+   AND start_at <= now()
+   AND end_at >= now()
+ RETURNING sold_count;
+```
+
+If the INSERT returns no row the user already purchased → `409`. If the UPDATE
+matches nothing the transaction rolls back and the reason is classified from a
+fresh read of the sale row (`upcoming` / `ended` / `sold_out`). The constraint
+`CHECK (sold_count <= total_quantity)` in the schema is the last line of
+defense.
+
+### Redis is advisory, never gating
+
+- `PurchaseGate.alreadyPurchased()` short-circuits repeat buyers with an instant
+  `409` — but the authoritative duplicate stop is the UNIQUE constraint.
+- `SaleStatusService` computes status from Postgres and caches it in Redis for
+  ~1s; a `sold_out`/`ended`/`upcoming` peek can reject requests in <1ms.
+- Both fast paths are best-effort. A Redis flush only costs a few extra
+  round-trips to Postgres — never correctness.
+
+### Sync vs queue mode
+
+`PURCHASE_MODE` selects the write path (default `sync`):
+
+- **`sync`** — the route runs the transaction inline and answers `201`.
+- **`queue`** — the route performs the cheap fast-path checks, enqueues the
+  intent via BullMQ, and answers `202 accepted` immediately. A worker
+  (`concurrency: 16`) drains the queue through the *same*
+  `PurchaseService.attempt()` transaction. Clients poll
+  `GET /api/purchases/:userId`, which reads Postgres directly, so idempotency
+  holds across retries. A dedicated producer Redis connection buffers bursts,
+  so request rate stops being the bottleneck.
+
+## Repo layout
+
+```
+infra/            docker-compose (postgres + redis) and SQL schema
+packages/shared/  Pure TS package: sale-window resolver + API contract types
+apps/server/      Fastify API (business logic, repository layer, optional BullMQ queue)
+apps/web/         React 19 + Vite SPA
+stress/           Standalone load-test harness that asserts the invariants
+```
+
+## Stack
+
+| Layer    | Tech |
+| -------- | ---- |
+| API      | Fastify 5, typed via shared contracts |
+| Data     | Postgres 16 (source of truth), Redis 7 (advisory cache), BullMQ 5 (optional queue) |
+| Web      | React 19, Vite 7 |
+| Language | TypeScript (strict, `verbatimModuleSyntax`, ESM), runs via `tsx` |
+| Tests    | Vitest (unit + integration), standalone stress harness |
+
+Money is integer cents (`price_cents`). All purchase writes go through one
+transaction; there is no alternate write path.
+
+## Getting started
+
+Prereqs: **Node >= 22** and **Docker** (for local Postgres/Redis). All commands
+run at repo root.
+
+```bash
+npm install          # install all workspaces
+npm run db:up        # start postgres + redis in Docker
+npm run db:migrate   # apply schema + seed the sale config
+npm run dev:server   # Fastify API on :3000 (tsx watch)
+npm run dev:web      # Vite React SPA on :5173 (proxies /api -> :3000)
+```
+
+The migrate script seeds one sale (`flash-sale-001`): 1,000 units at $199.00,
+window defaults to `now - 5m` → `now + 60m` so a fresh demo is immediately
+active. All defaults live in `apps/server/src/config.ts`.
+
+Stop the containers with `npm run db:down`.
+
+## API
+
+`POST /api/purchase` with body `{ "userId": "alice@example.com" }` — `userId`
+is any unique 1–255 character string (email, username, etc.).
+
+| HTTP | `result` | Meaning |
+| ---- | -------- | ------- |
+| 201 | `purchased` | Purchase confirmed; body has `purchaseId` |
+| 202 | `accepted` | Queue mode: enqueued; body has `attemptId` |
+| 400 | `invalid_user` | `userId` missing / empty / non-string / too long |
+| 404 | `not_found` | Sale does not exist |
+| 409 | `already_purchased` | This user already won (duplicate) |
+| 410 | `sold_out` or `ended` | Stock exhausted or window closed |
+| 425 | `upcoming` | Sale has not started yet |
+
+| Method | Path | Description |
+| ------ | ---- | ----------- |
+| GET    | `/api/sale/status` | Current status, price, stock, window (cached ~1s) |
+| GET    | `/api/purchases/:userId` | Whether a user purchased (reads Postgres directly) |
+| GET    | `/healthz` | Liveness probe |
+
+## Configuration
+
+Environment variables, read once at startup (`apps/server/src/config.ts`):
+
+| Var | Default |
+| --- | ------- |
+| `HOST` / `PORT` | `0.0.0.0` / `3000` |
+| `DATABASE_URL` | `postgres://flash:flash@localhost:5433/flash_sale` |
+| `REDIS_URL` | `redis://localhost:6379` |
+| `SALE_ID` | `flash-sale-001` |
+| `SALE_NAME` | `Flash Drop — Limited Edition Watch` |
+| `SALE_PRICE_CENTS` | `19900` |
+| `SALE_TOTAL_QUANTITY` | `1000` |
+| `SALE_START_AT` / `SALE_END_AT` | ISO timestamps; fall back to a live window (`-5m` / `+60m`) |
+| `PURCHASE_MODE` | `sync` (or `queue`) |
+
+## Testing
+
+```bash
+npm test          # unit + integration tests (needs db:up + migrate)
+npm run typecheck # tsc --noEmit across all workspaces
+npm run lint      # ESLint (flat config)
+```
+
+- **Unit** (`apps/server/test/unit`): sale-window boundaries — active exactly at
+  `start_at` and `end_at`, `ended` a millisecond later, `sold_out` wins inside
+  the window.
+- **Integration** (`apps/server/test/integration`): real Fastify + real
+  Postgres/Redis. Race suites assert the invariants under concurrency: 40
+  parallel attempts by one user → exactly one win; 100 users vs stock 50 →
+  exactly 50 winners; N users vs stock N → everyone wins once and
+  `sold_count == distinct purchases` everywhere.
+
+## Stress harness
+
+```bash
+npm run stress
+```
+
+`stress/` is a standalone harness that hits the running HTTP server and
+**independently verifies the invariants from Postgres** (it never trusts the
+HTTP responses). Defaults: 10,000 attempts, 200 concurrent workers, stock
+1,000 — the sale is reset to a clean state before each run.
+
+```bash
+STRESS_ATTEMPTS=20000 STRESS_CONCURRENCY=500 npm run stress
+```
+
+It reports a result histogram, throughput, latency percentiles (p50/p95/p99),
+and the Postgres ground-truth comparison (`sold_count` vs distinct purchase
+rows vs `total_quantity`), failing hard on any oversell or mismatch. In queue
+mode it additionally waits for workers to flush before verifying.

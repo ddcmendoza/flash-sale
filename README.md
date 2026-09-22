@@ -195,6 +195,41 @@ live in `apps/server/src/config.ts`.
 
 Stop the containers with `npm run db:down`.
 
+## Reset to a clean state
+
+Every test path below is self-cleaning at the *sale* level (each run re-arms the
+sales it targets and tears down the ones it seeds). But if you want the whole
+stack back to a pristine, freshly-seeded state — zero purchases, `sold_count`
+at 0 for all three demo sales, keys flushed — do:
+
+```bash
+npm run db:reset   # wipes Postgres data volume, restarts containers, re-applies schema + seeds
+```
+
+That runs `docker compose down -v` (drops the `pgdata` volume), brings the
+containers back up, and re-runs `db:migrate`, which applies the schema and seeds
+the three demo sales from scratch.
+
+> `npm run db:migrate` alone does **not** reset data: its seeding upsert uses
+> `ON CONFLICT DO NOTHING`, so re-running it leaves existing purchases and
+> `sold_count` untouched (useful for bringing the schema forward without losing
+> state). Reset with `db:reset` when you want a clean slate.
+
+To be explicit about what each suite needs and does to get to a clean state:
+
+| What you're running | Command | Clean-state behavior |
+| ------------------- | ------- | -------------------- |
+| Unit + integration tests | `npm test` | Needs `db:up` + `db:migrate` first. Integration tests seed their own `test-*` sales with known state and delete them on teardown; unit tests are DB-free. |
+| Full clean stack + dev servers | `npm run db:reset` then `npm run dev:server` + `npm run dev:web` | All three demo sales active, zero stock sold. |
+| Browser e2e suite | `npm run test:e2e` | Runs `db:up` + `db:migrate` itself; `globalSetup` re-arms the demo sales (sold_count → 0, live window) and flushes their Redis keys; each test seeds its own `e2e-*` sale and deletes it after. |
+| Locust load test (host server) | `npm run stress -s -- <flags>` | Re-arms every `STRESS_SALES` sale on start (wipes purchases, zeroes `sold_count`, re-seeds stock, sets a live window, flushes the Redis fast-path). |
+| Dockerized benchmark | `npm run bench -s -- <flags>` | Same re-arm as Locust; the container is removed when the run ends. |
+| Admin page / manual exploration | `npm run db:reset` then dev servers | `#/admin` reset button also wipes a single sale's purchases + restores stock. |
+
+Redis is advisory only, so a running `db:reset`-equivalent flush isn't required
+for correctness — the e2e `globalSetup`, the Locust re-arm, and every admin
+mutation that touches a sale clear the relevant keys anyway.
+
 ## API
 
 `POST /api/sales/:saleId/purchase` with body `{ "userId": "alice@example.com" }`
@@ -274,6 +309,11 @@ npm run typecheck # tsc --noEmit across all workspaces
 npm run lint      # ESLint (flat config)
 ```
 
+From a clean state: `npm run db:up && npm run db:migrate` (or just
+`npm run db:reset`), then any of the above. Integration tests are
+self-cleaning — they create their own `test-*` sales from known state and remove
+them on teardown, so the shared dev DB's catalog stays uncluttered.
+
 - **Unit** (`apps/server/test/unit`): sale-window boundaries — active exactly at
   `start_at` and `end_at`, `ended` a millisecond later, `sold_out` wins inside
   the window.
@@ -296,7 +336,8 @@ Fastify API, the Vite SPA (with `/api` proxied to the API), and straight-to-
 Postgres ground truth. No mocks: each test creates its own sale through the
 real admin API (`makeSale` fixture) and deletes it afterwards, so the shared
 dev DB's catalog stays clean. A `globalSetup` re-arms the three demo sales and
-flushes the advisory Redis keys before running.
+flushes the advisory Redis keys before running — so `npm run test:e2e` never
+needs a manual reset, even after a load test has sold stock out.
 
 The three spec files cover the demo page's buy flow and per-user limits
 (`src/tests/demo.spec.ts`), the sale-window invariants (upcoming / ended /

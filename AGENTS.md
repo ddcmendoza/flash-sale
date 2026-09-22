@@ -63,7 +63,8 @@ Prereqs: Node >= 22, Docker (for local PG/Redis). All commands run at repo root.
 ```
 npm install                # install all workspaces
 npm run db:up              # start postgres + redis in Docker
-npm run db:migrate         # apply schema + seed the sale config
+npm run db:migrate         # apply schema + seed the sale config (idempotent; does NOT reset sold_count/purchases)
+npm run db:reset           # wipe Postgres data volume + restart + re-migrate (true clean slate)
 npm run dev:server         # Fastify API on :3000 (tsx watch)
 npm run dev:web            # Vite React SPA on :5173 (proxies /api -> :3000)
 npm run test               # unit + integration tests (needs db:up + migrate)

@@ -19,6 +19,9 @@
     "start:web": "npm run preview -w @flash-sale/web",
     "test": "npm run test -w @flash-sale/server",
     "test:watch": "npm run test:watch -w @flash-sale/server",
+    "test:e2e": "npm run db:up -s && npm run db:migrate -s && npm run test -w @flash-sale/e2e",
+    "e2e:ui": "npm run test:ui -w @flash-sale/e2e",
+    "bench": "sh stress/docker/run.sh",
     "typecheck": "npm run typecheck --workspaces --if-present",
     "lint": "eslint .",
     "stress": "sh stress/locust/run.sh"

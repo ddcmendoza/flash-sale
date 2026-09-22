@@ -16,6 +16,8 @@ apps/web/.vite/
 # Coverage / test artifacts
 coverage/
 *.log
+test-results/
+playwright-report/
 
 # Env / secrets
 .env

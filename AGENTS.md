@@ -22,7 +22,8 @@ infra/            docker-compose (postgres + redis) and SQL schema
 packages/shared/  Pure TS package: sale-window resolver + API contract types
 apps/server/      Fastify API (business logic, repository layer, optional BullMQ queue)
 apps/web/         React 19 + Vite SPA (sale selector; live data over SSE)
-stress/           Locust load-test harness (locustfile.py + Postgres verifier)
+apps/e2e/         Playwright suite against the real stack (see Testing)
+stress/           Locust load-test harness (locustfile.py + Postgres verifier) + dockerized bench
 ```
 
 ## Golden rules (do not violate)
@@ -66,9 +67,12 @@ npm run db:migrate         # apply schema + seed the sale config
 npm run dev:server         # Fastify API on :3000 (tsx watch)
 npm run dev:web            # Vite React SPA on :5173 (proxies /api -> :3000)
 npm run test               # unit + integration tests (needs db:up + migrate)
+npm run test:e2e           # Playwright e2e suite: db up + migrate + browser tests
+npm run e2e:ui             # Playwright UI mode
 npm run typecheck          # tsc --noEmit across all workspaces
 npm run lint               # ESLint (flat config)
 npm run stress             # Locust load harness (cd stress/locust && locust); see README.md
+npm run bench              # Dockerized benchmark: pinned CPU/mem container + Locust (see README.md)
 npm run db:down            # stop containers
 ```
 
@@ -109,7 +113,17 @@ npm run db:down            # stop containers
   independently verifies the invariants from Postgres per sale (re-arms the
   sales on start, verifies on stop). `STRESS_SALES` controls which sales are
   hit; `STRESS_SSE_WATCHERS` spawns real SSE subscribers that must receive live
-  frames by run end.
+  frames by run end. `npm run bench` (`stress/docker/run.sh`) runs the same
+  harness against the API in a container pinned via `STRESS_CPUS` / `STRESS_MEM`
+  (defaults 2 / 256m) with `STRESS_PORT` to pick the host port.
+- Playwright e2e (`apps/e2e/`): drives the real SPA + API + Postgres. `makeSale`
+  fixture creates a per-test sale via the real admin API and deletes it on
+  teardown; `globalSetup` re-arms demo sales and flushes Redis. Points at the
+  stack via `E2E_API_URL` (default `http://localhost:3000`), `E2E_WEB_URL`
+  (default `http://localhost:5173`); `E2E_API_URL` also becomes the Vite proxy
+  target. When rerouting ports, prefer a port that is demonstrably free — a
+  foreign service squatting the API port can otherwise pass the `/healthz`
+  probe.
 
 ## Ports
 

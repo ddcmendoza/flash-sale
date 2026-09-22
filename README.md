@@ -158,7 +158,8 @@ infra/            docker-compose (postgres + redis) and SQL schema
 packages/shared/  Pure TS package: sale-window resolver + API contract types
 apps/server/      Fastify API (business logic, repository layer, optional BullMQ queue)
 apps/web/         React 19 + Vite SPA (sale selector + `#/admin` management page)
-stress/           Locust load-test harness (locustfile + Postgres verifier)
+apps/e2e/         Playwright end-to-end suite against the real stack
+stress/           Locust load-test harness (locustfile + Postgres verifier) + dockerized bench
 ```
 
 ## Stack
@@ -169,7 +170,7 @@ stress/           Locust load-test harness (locustfile + Postgres verifier)
 | Data     | Postgres 16 (source of truth), Redis 7 (advisory cache), BullMQ 5 (optional queue) |
 | Web      | React 19, Vite 7 |
 | Language | TypeScript (strict, `verbatimModuleSyntax`, ESM), runs via `tsx` |
-| Tests    | Vitest (unit + integration), Locust load harness |
+| Tests    | Vitest (unit + integration), Playwright (e2e), Locust load harness |
 
 Money is integer cents (`price_cents`). All purchase writes go through one
 transaction; there is no alternate write path.
@@ -283,6 +284,40 @@ npm run lint      # ESLint (flat config)
   `sold_count == distinct purchases` everywhere. The admin suite drives the
   full CRUD/reset/delete surface and verifies catalog cleanup.
 
+## End-to-end tests (Playwright)
+
+```bash
+npm run test:e2e              # db up + migrate, then the browser suite
+npm run e2e:ui                # watch mode with the Playwright UI
+```
+
+`apps/e2e/` is a Playwright suite that drives the **real running stack** — the
+Fastify API, the Vite SPA (with `/api` proxied to the API), and straight-to-
+Postgres ground truth. No mocks: each test creates its own sale through the
+real admin API (`makeSale` fixture) and deletes it afterwards, so the shared
+dev DB's catalog stays clean. A `globalSetup` re-arms the three demo sales and
+flushes the advisory Redis keys before running.
+
+The three spec files cover the demo page's buy flow and per-user limits
+(`src/tests/demo.spec.ts`), the sale-window invariants (upcoming / ended /
+sold-out, with the badge flipping live over SSE in `src/tests/window.spec.ts`),
+and the `#/admin` CRUD surface (create → edit → reset → purchases → delete,
+validation, in `src/tests/admin.spec.ts`).
+
+First run only: `npx playwright install chromium` (in `apps/e2e`), so the
+browser binary is downloaded. Run `npm run test:e2e` afterwards; the suite
+reuses already-running API/web servers when it finds them.
+
+Neither Postgres nor the web server need a code update for the suite; the only
+moving parts are URLs, overridable per run:
+
+```bash
+E2E_API_URL=http://localhost:3110 E2E_WEB_URL=http://localhost:5173 npm run test:e2e
+```
+
+`E2E_API_URL` also becomes the Vite proxy target, so the web app and the API
+always agree on where `/api` lives.
+
 ## Load testing (Locust)
 
 ```bash
@@ -346,3 +381,35 @@ invariants it enforced live on in the Locust hooks.
 
 `npm run stress` is a thin alias: `cd stress/locust && locust` (pass flags
 after `--`).
+
+### Dockerized benchmark (consistent, resource-pinned)
+
+Load-testing a laptop server makes results depend on whatever else is running.
+`npm run bench` runs the **same API inside a container pinned to a fixed CPU
+share and memory budget** (defaults: **2 CPUs / 256 MiB**), then hits it with
+Locust:
+
+```bash
+npm run bench -s -- -u 2000 --spawn-rate 2000 -t 60s --headless
+```
+
+Tunable via env (everything else flows straight to Locust):
+
+| Env | Default | Meaning |
+| --- | ------- | ------- |
+| `STRESS_CPUS` | `2` | `--cpus` for the server container |
+| `STRESS_MEM` | `256m` | `--memory` for the server container |
+| `STRESS_PORT` | `3000` | host port the container listens on |
+| `STRESS_DATABASE_URL` | `postgres://flash:flash@localhost:5433/flash_sale` | DB the server container talks to |
+| `STRESS_REDIS_URL` | `redis://localhost:6379` | Redis the server container talks to |
+| `STRESS_SERVER_ENV` | *(empty)* | extra container env, e.g. `PURCHASE_MODE=queue` |
+
+The image (`stress/docker/Dockerfile`) is built from the repo root, the
+container runs on the host network pointing at the same Postgres/Redis as local
+dev, and the Locust harness's normal re-arm + Postgres verification apply
+unchanged. The container is removed after the run. Example with overrides:
+
+```bash
+STRESS_CPUS=4 STRESS_MEM=512m STRESS_PORT=3001 STRESS_SALES=flash-sale-001,flash-sale-002,flash-sale-003 \
+  npm run bench -s -- -u 1000 --spawn-rate 10 -t 10m --headless
+```

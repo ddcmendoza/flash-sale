@@ -405,9 +405,13 @@ Tunable via env (everything else flows straight to Locust):
 | `STRESS_SERVER_ENV` | *(empty)* | extra container env, e.g. `PURCHASE_MODE=queue` |
 
 The image (`stress/docker/Dockerfile`) is built from the repo root, the
-container runs on the host network pointing at the same Postgres/Redis as local
-dev, and the Locust harness's normal re-arm + Postgres verification apply
-unchanged. The container is removed after the run. Example with overrides:
+container's port is published to the host (Docker Desktop doesn't forward
+`--network host` loopback) and it points at the same Postgres/Redis as local
+dev via `host.docker.internal`. `STRESS_PORT` defaults to 3000; if that port is
+already taken the harness falls back to the next free one until the real
+flash-sale API answers the health probe. The Locust harness's normal re-arm +
+Postgres verification apply unchanged. The container is removed after the run.
+Example with overrides:
 
 ```bash
 STRESS_CPUS=4 STRESS_MEM=512m STRESS_PORT=3001 STRESS_SALES=flash-sale-001,flash-sale-002,flash-sale-003 \

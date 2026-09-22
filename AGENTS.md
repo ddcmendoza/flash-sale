@@ -116,6 +116,8 @@ npm run db:down            # stop containers
   frames by run end. `npm run bench` (`stress/docker/run.sh`) runs the same
   harness against the API in a container pinned via `STRESS_CPUS` / `STRESS_MEM`
   (defaults 2 / 256m) with `STRESS_PORT` to pick the host port.
+  `STRESS_MODE=queue` (`Dockerfile.queue`) benchmarks the queue write path
+  (202-accepted + in-process BullMQ worker).
 - Playwright e2e (`apps/e2e/`): drives the real SPA + API + Postgres. `makeSale`
   fixture creates a per-test sale via the real admin API and deletes it on
   teardown; `globalSetup` re-arms demo sales and flushes Redis. Points at the

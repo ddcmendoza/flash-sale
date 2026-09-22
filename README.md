@@ -397,6 +397,7 @@ Tunable via env (everything else flows straight to Locust):
 
 | Env | Default | Meaning |
 | --- | ------- | ------- |
+| `STRESS_MODE` | `sync` | write path: `sync` or `queue` (selects the Dockerfile/image; queue runs an in-process BullMQ worker) |
 | `STRESS_CPUS` | `2` | `--cpus` for the server container |
 | `STRESS_MEM` | `256m` | `--memory` for the server container |
 | `STRESS_PORT` | `3000` | host port the container listens on |
@@ -404,7 +405,8 @@ Tunable via env (everything else flows straight to Locust):
 | `STRESS_REDIS_URL` | `redis://localhost:6379` | Redis the server container talks to |
 | `STRESS_SERVER_ENV` | *(empty)* | extra container env, e.g. `PURCHASE_MODE=queue` |
 
-The image (`stress/docker/Dockerfile`) is built from the repo root, the
+The image (`stress/docker/Dockerfile` for sync, `Dockerfile.queue` for queue
+mode) is built from the repo root, the
 container's port is published to the host (Docker Desktop doesn't forward
 `--network host` loopback) and it points at the same Postgres/Redis as local
 dev via `host.docker.internal`. `STRESS_PORT` defaults to 3000; if that port is
@@ -416,4 +418,7 @@ Example with overrides:
 ```bash
 STRESS_CPUS=4 STRESS_MEM=512m STRESS_PORT=3001 STRESS_SALES=flash-sale-001,flash-sale-002,flash-sale-003 \
   npm run bench -s -- -u 1000 --spawn-rate 10 -t 10m --headless
+
+# queue write path (202 accepted; worker drains through the same transaction)
+STRESS_MODE=queue npm run bench -s -- -u 2000 --spawn-rate 2000 -t 60s --headless
 ```

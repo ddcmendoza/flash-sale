@@ -77,6 +77,7 @@ WINS: dict[str, set[str]] = {s: set() for s in SALE_IDS}
 STARTED: dict[str, int] = {s: 0 for s in SALE_IDS}
 ASSIGNED: dict[str, set[str]] = {s: set() for s in SALE_IDS}
 QUEUE_MODE: list[bool] = [False]  # flip when a 202 "accepted" is observed
+ACCEPTED: dict[str, int] = {s: 0 for s in SALE_IDS}  # 202 enqueued per sale
 SSE_EVENTS: dict[str, int] = {s: 0 for s in SALE_IDS}  # frames received per sale
 SSE_ERRORS: list[int] = [0]
 SSE_GREENLETS: list[gevent.Greenlet] = []
@@ -232,6 +233,9 @@ def _verify(environment):
 def _stats(num_requests: int) -> str:
     wins = sum(len(s) for s in WINS.values())
     sse = sum(SSE_EVENTS.values())
+    if QUEUE_MODE[0]:
+        accepted = sum(ACCEPTED.values())
+        return f"{num_requests} requests, {accepted} accepted, {sse} SSE frames"
     return f"{num_requests} requests, {wins} wins, {sse} SSE frames"
 
 
@@ -269,6 +273,7 @@ class FlashSaleUser(HttpUser):
                 resp.success()
             elif code == 202:
                 QUEUE_MODE[0] = True
+                ACCEPTED[self.sale_id] += 1
                 resp.success()
             elif code in EXPECTED_CODES:
                 resp.success()

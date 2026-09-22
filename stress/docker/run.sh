@@ -7,6 +7,7 @@
 #   npm run bench -s -- -u 2000 --spawn-rate 2000 -t 60s --headless
 #   STRESS_CPUS=4 STRESS_MEM=512m STRESS_PORT=3001 \
 #     npm run bench -s -- -u 1000 --spawn-rate 10 -t 10m --headless
+#   STRESS_MODE=queue npm run bench -s -- -u 2000 --spawn-rate 2000 -t 60s --headless
 #
 # Networking: we publish the container's port to the host (-p), NOT --network
 # host. On Docker Desktop the container runs inside a VM network namespace, so
@@ -24,7 +25,14 @@
 set -eu
 
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
-IMAGE="${STRESS_IMAGE:-flash-sale/server:bench}"
+# sync (default) or queue; selects Dockerfile + image tag below.
+MODE="${STRESS_MODE:-sync}"
+case "${MODE}" in
+  sync)  DOCKERFILE="Dockerfile";  IMAGE_TAG="flash-sale/server:bench";;
+  queue) DOCKERFILE="Dockerfile.queue"; IMAGE_TAG="flash-sale/server:bench-queue";;
+  *) echo "!! STRESS_MODE must be 'sync' or 'queue' (got '${MODE}')"; exit 1;;
+esac
+IMAGE="${STRESS_IMAGE:-${IMAGE_TAG}}"
 CONTAINER="flash-sale-bench"
 DATABASE_URL="${STRESS_DATABASE_URL:-postgres://flash:flash@host.docker.internal:5433/flash_sale}"
 REDIS_URL="${STRESS_REDIS_URL:-redis://host.docker.internal:6379}"
@@ -34,8 +42,8 @@ MEM="${STRESS_MEM:-256m}"
 SERVER_ENV="${STRESS_SERVER_ENV:-}"
 PORT="${STRESS_PORT:-3000}"
 
-echo ">> building ${IMAGE} (repo: ${ROOT})"
-docker build -q -t "${IMAGE}" -f "${ROOT}/stress/docker/Dockerfile" "${ROOT}"
+echo ">> building ${IMAGE} (${MODE} mode, repo: ${ROOT})"
+docker build -q -t "${IMAGE}" -f "${ROOT}/stress/docker/${DOCKERFILE}" "${ROOT}"
 
 cleanup() {
   echo ">> stopping '${CONTAINER}'"

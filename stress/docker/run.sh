@@ -13,8 +13,11 @@
 # host. On Docker Desktop the container runs inside a VM network namespace, so
 # --network host binds to the VM loopback (192.168.65.x) which your host's
 # localhost never reaches; published ports are the only ones Docker Desktop
-# actually forwards. host.docker.internal is used to reach host Postgres/Redis
-# (native Linux gets it via --add-host host-gateway).
+# actually forwards. host.docker.internal is used to reach host Postgres/Redis:
+# Docker Desktop (macOS/Windows) resolves it natively to the host, while plain
+# Linux Docker needs it aliased to the host gateway. We probe the image at
+# runtime and only inject --add-host host.docker.internal:host-gateway when the
+# native resolution is absent (STRESS_ADD_HOST=1|0 overrides the probe).
 #
 # Port selection: starts at 3000 (or STRESS_PORT when set). docker run fails
 # fast if another service already publishes that host port, so we retry on the
@@ -45,6 +48,28 @@ PORT="${STRESS_PORT:-3000}"
 echo ">> building ${IMAGE} (${MODE} mode, repo: ${ROOT})"
 docker build -q -t "${IMAGE}" -f "${ROOT}/stress/docker/${DOCKERFILE}" "${ROOT}"
 
+# Probe whether this Docker resolves host.docker.internal natively (Docker
+# Desktop on macOS/Windows does, out of the box). Plain Linux Docker does not,
+# so it needs --add-host host.docker.internal:host-gateway aliasing. Probe with
+# the just-built image so the check uses the real runtime environment.
+ADD_HOST_ARGS=""
+case "${STRESS_ADD_HOST:-auto}" in
+  auto)
+    if docker run --rm --entrypoint node "${IMAGE}" -e \
+      "require('dns').lookup('host.docker.internal', (e) => process.exit(e ? 1 : 0))" \
+      >/dev/null 2>&1; then
+      echo ">> host.docker.internal resolves natively; no --add-host needed"
+    else
+      ADD_HOST_ARGS="--add-host host.docker.internal:host-gateway"
+      echo ">> native host.docker.internal missing; using --add-host host-gateway"
+    fi
+    ;;
+  0) echo ">> STRESS_ADD_HOST=0: no --add-host";;
+  1) ADD_HOST_ARGS="--add-host host.docker.internal:host-gateway"
+     echo ">> STRESS_ADD_HOST=1: forcing --add-host host-gateway";;
+  *) echo "!! STRESS_ADD_HOST must be auto, 0 or 1 (got '${STRESS_ADD_HOST:-auto}')"; exit 1;;
+esac
+
 cleanup() {
   echo ">> stopping '${CONTAINER}'"
   docker rm -f "${CONTAINER}" >/dev/null 2>&1 || true
@@ -65,13 +90,11 @@ while [ "$tried" -lt 10 ] && [ -z "$found" ]; do
   tried=$((tried + 1))
 
   echo ">> starting server container '${CONTAINER}' (${CPUS} CPUs / ${MEM} mem, port ${PORT})"
-  # Publish the port and alias host.docker.internal to the host gateway (no-op
-  # on Docker Desktop which provides it natively; required on plain Linux Docker).
   if ! docker run -d \
     --name "${CONTAINER}" \
     --cpus "${CPUS}" \
     --memory "${MEM}" \
-    --add-host host.docker.internal:host-gateway \
+    ${ADD_HOST_ARGS} \
     -p "${PORT}:${PORT}" \
     -e PORT="${PORT}" \
     -e DATABASE_URL="${DATABASE_URL}" \

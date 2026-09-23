@@ -1,0 +1,22 @@
+# Bench image build context (stress/docker/Dockerfile*) only needs the
+# workspace manifests + apps/ + packages/ source. Everything else bloats the
+# context transfer — worst on macOS, where the Docker daemon lives in a VM and
+# the whole context crosses the socket at every build.
+
+node_modules/
+**/node_modules/
+
+.git/
+.lavish/
+.stress/
+test-results/
+playwright-report/
+stress/locust/.venv/
+stress/locust/*.log
+stress/docker/.run.err
+apps/e2e/test-results/
+apps/e2e/playwright-report/
+
+*.log
+dist/
+coverage/

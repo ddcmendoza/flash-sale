@@ -346,8 +346,9 @@ and the `#/admin` CRUD surface (create → edit → reset → purchases → dele
 validation, in `src/tests/admin.spec.ts`).
 
 First run only: `npx playwright install chromium` (in `apps/e2e`), so the
-browser binary is downloaded. Run `npm run test:e2e` afterwards; the suite
-reuses already-running API/web servers when it finds them.
+browser binary is downloaded (a Darwin/arm64 build is fetched on Apple Silicon
+without extra flags). Run `npm run test:e2e` afterwards; the suite reuses
+already-running API/web servers when it finds them.
 
 Neither Postgres nor the web server need a code update for the suite; the only
 moving parts are URLs, overridable per run:
@@ -366,6 +367,9 @@ cd stress/locust
 python3 -m venv .venv && .venv/bin/pip install -r requirements.txt
 npm run stress -s -- -u 2000 --spawn-rate 500 -t 60s --headless
 ```
+
+(Any recent `python3` works — the venv route is portable; `locust`, `psycopg`
+and `redis` all ship macOS/arm64 wheels.)
 
 `stress/locust/` is a **Locust**-based load harness. The Locust CLI is the
 entire load-shaping surface — *different kinds of load are just flags*:
@@ -442,15 +446,20 @@ Tunable via env (everything else flows straight to Locust):
 | `STRESS_CPUS` | `2` | `--cpus` for the server container |
 | `STRESS_MEM` | `256m` | `--memory` for the server container |
 | `STRESS_PORT` | `3000` | host port the container listens on |
-| `STRESS_DATABASE_URL` | `postgres://flash:flash@localhost:5433/flash_sale` | DB the server container talks to |
-| `STRESS_REDIS_URL` | `redis://localhost:6379` | Redis the server container talks to |
+| `STRESS_DATABASE_URL` | `postgres://flash:flash@host.docker.internal:5433/flash_sale` | DB the server container talks to |
+| `STRESS_REDIS_URL` | `redis://host.docker.internal:6379` | Redis the server container talks to |
+| `STRESS_ADD_HOST` | `auto` | `auto` probes whether `host.docker.internal` resolves natively and only injects `--add-host ...:host-gateway` when it doesn't; `1` forces it, `0` disables it |
 | `STRESS_SERVER_ENV` | *(empty)* | extra container env, e.g. `PURCHASE_MODE=queue` |
 
 The image (`stress/docker/Dockerfile` for sync, `Dockerfile.queue` for queue
 mode) is built from the repo root, the
 container's port is published to the host (Docker Desktop doesn't forward
 `--network host` loopback) and it points at the same Postgres/Redis as local
-dev via `host.docker.internal`. `STRESS_PORT` defaults to 3000; if that port is
+dev via `host.docker.internal` — Docker Desktop (macOS/Windows) resolves that
+name natively, so the harness only aliases it to the host gateway on plain
+Linux Docker (and the `auto` probe decides, so Apple Silicon / macOS works
+unchanged; `--cpus`/`--memory` pinning applies inside the Desktop VM).
+`STRESS_PORT` defaults to 3000; if that port is
 already taken the harness falls back to the next free one until the real
 flash-sale API answers the health probe. The Locust harness's normal re-arm +
 Postgres verification apply unchanged. The container is removed after the run.

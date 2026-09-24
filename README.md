@@ -472,3 +472,76 @@ STRESS_CPUS=4 STRESS_MEM=512m STRESS_PORT=3001 STRESS_SALES=flash-sale-001,flash
 # queue write path (202 accepted; worker drains through the same transaction)
 STRESS_MODE=queue npm run bench -s -- -u 2000 --spawn-rate 2000 -t 60s --headless
 ```
+
+#### Mode comparison (sync vs queue, head-to-head)
+
+Head-to-head runs: three identical **60s bursts, 2,000 vusers spawned
+instantly** against each mode on the dockerized bench (2 CPUs / 256 MiB
+container), alternating sync → queue, each run re-armed from a clean slate
+(method + full command list: `tmp/COMPARE_RUNBOOK.md`). Latency in ms. Two load
+shapes: **stock 1,000** (contention is brief — the sale sells out under the
+spawn storm, then both modes run on fast-path 409/410) and **stock 10**
+(extreme contention — every attempt loses, only 10 rows are ever committed):
+
+| Shape | Metric | sync (×3) | queue (×3) |
+| ----- | ------ | --------- | ---------- |
+| stock 1,000 | requests | 177,371 · 174,223 · 176,405 | 172,098 · 175,620 · 171,396 |
+| | throughput | 2,926 · 2,876 · 2,912 req/s | 2,837 · 2,894 · 2,825 req/s |
+| | median | 20 · 20 · 20 | 21 · 21 · 21 |
+| | p95 | 92 · 96 · 92 | 93 · 93 · 95 |
+| | p99 | 570 · 980 · 970 | 950 · 530 · 560 |
+| | wins / accepted | 1,000 · 1,000 · 1,000 | ~54,000 accepted |
+| | committed rows | 1,000 · 1,000 · 1,000 | drain → 1,000 (verified post-run) |
+| stock 10 | requests | 159,424 · 160,611 · 162,486 | 157,830 · 164,522 · 166,177 |
+| | throughput | 2,625 · 2,650 · 2,679 req/s | 2,599 · 2,709 · 2,737 req/s |
+| | median | 24 · 24 · 23 | 23 · 22 · 22 |
+| | p95 | 110 · 100 · 100 | 110 · 95 · 93 |
+| | p99 | 770 · 800 · 770 | 1,300 · 1,200 · 1,200 |
+| | wins / accepted | 10 · 10 · 10 | ~160,000 accepted (≈ every request) |
+| | committed rows | 10 · 10 · 10 | drain → 10 (verified post-run) |
+| both | request failures | 0 · 0 · 0 | 0 · 0 · 0 |
+| both | verify | PASS ×3 | PASS ×3 |
+
+Takeaways:
+
+- **Correctness is identical and invariant-safe in both modes and both
+  shapes.** Every run committed exactly stock (1,000 or 10 winners), zero
+  failed requests, `VERIFY: PASS`. The queue's worker drains to the same
+  committed rows a few seconds after the run (verified in Postgres post-run) —
+  the handoff changes *when* rows commit, never *how many*.
+- **Raw throughput is within noise in both shapes.** stock 1,000: sync ~2,905
+  vs queue ~2,852 req/s (~+1.8%). stock 10: ~2,651 vs ~2,682 req/s (queue
+  +1.2%). On a shared host each mode's own runs span ~3%, so neither shape shows
+  a real throughput winner.
+- **stock 1,000: latency is a tie.** Median 20/21 ms, p95 ~93 ms; p99 is noisy
+  in both (sync 570–980, queue 530–950) from the instant-spawn storm. The queue's
+  enqueue hop is offset by returning before commit.
+- **stock 10: the queue moves the cost, it doesn't remove it.** With 10 winners
+  and ~160k attempts, the mean/median edge narrows or flips to sync — median
+  23-24 ms in both, p95 ~95-110 ms in both, and queue's **p99 is markedly worse**
+  (1,200-1,300 vs 770-800 ms). Every loser is enqueued (the producer can't know
+  the sale sold out without an authoritative read, and AGENTS.md forbids gating
+  the write path on a Redis status read), so ~160k of ~160k requests become
+  BullMQ jobs that the worker rejects one-by-one. Offloading the row-lock wait
+  from the handler is real, but the enqueue path itself pays for it at p99 when
+  effort ≫ stock.
+- **Both shapes show a heavy tail (~45–59 s max).** It appears in sync *and*
+  queue regardless of stock, so it is the spawn storm / shared-host effect, not
+  the write path.
+- **`accepted` count ≠ purchases in queue mode.** Accepted tracks "enqueued,"
+  which under a stock-10 storm is ~every request, while committed rows stay
+  exactly 10. The commit gate is still `UNIQUE(sale_id, user_id)`, so only the
+  correct number of distinct winners ever land. This is the expected queue-mode
+  signature, not a leak.
+
+**So what is the queue actually for?** At these bench shapes (one pinned
+container, Locust measuring client-visible latency, store in shared containers)
+queue mode buys **no** latency or throughput win and is slightly worse at p99
+under effort ≫ stock. Its real value is operational and only shows at shapes
+this bench deliberately excludes: keeping the HTTP plane (health, SSE fan-out,
+catalog, admin) responsive while the DB is saturated, bounding *client* latency
+at the enqueue hop, and retrying failed transactions off the hot path. If the
+goal is "fastest request latency on the dockerized bench," sync wins this
+benchmark; if the goal is "client responds fast even when the store is the
+bottleneck, accepting eventual commit," queue is the tool — the two modes and
+the tradeoff are intentional (see AGENTS.md golden rule).

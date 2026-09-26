@@ -421,7 +421,7 @@ before you buy anything:
 
 | Sale | Window | Shows |
 | ---- | ------ | ----- |
-| `flash-sale-001` | `now - 5m` → `now + 60m` | **active** — the live drop, and the one every alias route, the test suites and the load harness point at |
+| `flash-sale-001` | `now - 5m` → `now + 60m` | **active** — the live drop; what `/api/purchase` and the other legacy aliases resolve to, and the sale the load harness hits by default |
 | `flash-sale-002` | `now - 3h` → `now - 2h` | **ended** — Buy Now answers `410` |
 | `flash-sale-003` | `now + 2h` → `now + 26h` | **upcoming** — the badge counts down, Buy Now answers `425` |
 

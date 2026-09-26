@@ -294,23 +294,35 @@ npm run dev:server   # Fastify API on :3000 (tsx watch)
 npm run dev:web      # Vite React SPA on :5173 (proxies /api -> :3000)
 ```
 
-The migrate script seeds **three** demo sales (see [Multi-sale seeding](#multi-sale-seeding)):
-`flash-sale-001` defaults to 1,000 units at $199.00 with a window of
-`now - 5m` → `now + 60m` so a fresh demo is immediately active. All defaults
-live in `apps/server/src/config.ts`. The same seed runs inside the one-command
-stack, so the three demo sales exist there too.
+The migrate script seeds **three** demo sales (see [Multi-sale seeding](#multi-sale-seeding))
+and prints the state each one landed in, so a migrate run is its own proof of
+what the catalog shows:
 
-**That window is one hour long, so a demo set up on a lunch break has ended by
-the time you come back.** Re-running `npm run db:migrate` fixes it: the seed is
-self-healing — any demo sale whose window has already closed is re-armed with a
-live window, `sold_count` zeroed and its purchases cleared (a live sale is left
-strictly alone, so this is safe to run mid-sale). It also flushes the advisory
-Redis keys of anything it re-armed, so a previous run's buyer can't be told
-`409 already_purchased` for a row that no longer exists. The one-command stack
-does the same thing for you: it runs the migration on every start, so
-`--fresh`-less restarts re-arm an expired sale instead of handing you three
-ENDED sales and a `410` from every Buy Now. For a full wipe, including a sale
-that is still live, use `db:reset` below.
+```
+[migrate] demo catalog, one ended + one live + one upcoming:
+  flash-sale-002  ended
+  flash-sale-001  active
+  flash-sale-003  upcoming
+```
+
+`flash-sale-001` defaults to 1,000 units at $199.00 with a window of
+`now - 5m` → `now + 60m` so a fresh demo is immediately active, and the other two
+drops are staged as one finished and one not-yet-open so the state machine is
+visible on arrival. All defaults live in `apps/server/src/config.ts`. The same
+seed runs inside the one-command stack, so the three demo sales exist there too.
+
+**That live window is one hour long, so a demo set up on a lunch break has ended
+by the time you come back.** Re-running `npm run db:migrate` fixes it: the seed is
+self-healing — a demo sale whose window no longer matches the state it is staged
+into is re-staged (window refreshed, `sold_count` zeroed, its purchases cleared),
+which covers both an expired live sale and a staged sale whose window has since
+opened. A sale already in its staged state is left strictly alone, so this is
+safe to run mid-sale. It also flushes the advisory Redis keys of anything it
+re-staged, so a previous run's buyer can't be told `409 already_purchased` for a
+row that no longer exists. The one-command stack does the same thing for you: it
+runs the migration on every start, so `--fresh`-less restarts re-arm an expired
+sale instead of handing you three ENDED sales and a `410` from every Buy Now. For
+a full wipe, including a sale that is still live, use `db:reset` below.
 
 Stop the containers with `npm run db:down`.
 
@@ -330,19 +342,19 @@ containers back up, and re-runs `db:migrate`, which applies the schema and seeds
 the three demo sales from scratch.
 
 > `npm run db:migrate` alone does **not** reset data: existing purchases and
-> `sold_count` are left untouched on a sale whose window is still live (useful
-> for bringing the schema forward without losing state), and only a sale whose
-> window has already **closed** is re-armed. Reset with `db:reset` when you want
-> a clean slate regardless of window state.
+> `sold_count` are left untouched on a sale that is already in the state it is
+> staged into (useful for bringing the schema forward without losing state), and
+> only a sale that has drifted out of it is re-staged. Reset with `db:reset` when
+> you want a clean slate regardless of window state.
 
 To be explicit about what each suite needs and does to get to a clean state:
 
 | What you're running | Command | Clean-state behavior |
 | ------------------- | ------- | -------------------- |
 | Unit + integration tests | `npm test` | Needs `db:up` + `db:migrate` first. Integration tests seed their own `test-*` sales with known state and delete them on teardown; unit tests are DB-free. |
-| Full clean stack + dev servers | `npm run db:reset` then `npm run dev:server` + `npm run dev:web` | All three demo sales active, zero stock sold. |
+| Full clean stack + dev servers | `npm run db:reset` then `npm run dev:server` + `npm run dev:web` | The three demo sales back in their staged states — one ended, one live, one upcoming — with zero stock sold. |
 | One-command stack (Docker) | `npm run dev:up -- --fresh` | Drops **only** `flash-sale-demo_pgdata`, its own volume, then re-applies schema + seeds. Never touches the dev stack's volume. Plain `npm run dev:up` reuses the volume and re-arms any expired sale on start. |
-| Browser e2e suite | `npm run test:e2e` | Runs `db:up` + `db:migrate` itself; `globalSetup` re-arms the demo sales (sold_count → 0, live window) and flushes their Redis keys; each test seeds its own `e2e-*` sale and deletes it after. |
+| Browser e2e suite | `npm run test:e2e` | Runs `db:up` + `db:migrate` itself; `globalSetup` re-arms the demo sales (sold_count → 0, each back in its staged window: one ended, one live, one upcoming) and flushes their Redis keys; each test seeds its own `e2e-*` sale and deletes it after. |
 | Locust load test (host server) | `npm run stress -s -- <flags>` | Re-arms every `STRESS_SALES` sale on start (wipes purchases, zeroes `sold_count`, re-seeds stock, sets a live window, flushes the Redis fast-path). |
 | Dockerized benchmark | `npm run bench -s -- <flags>` | Same re-arm as Locust; the container is removed when the run ends. |
 | Admin page / manual exploration | `npm run db:reset` then dev servers | `#/admin` reset button also wipes a single sale's purchases + restores stock. |
@@ -404,7 +416,27 @@ one-click reset, purchase inspection, and delete with confirmation.
 `npm run db:migrate` seeds **three** demo sales out of the box —
 `flash-sale-001` (the `SALE_*` configured default, $199 watch ×1,000),
 `flash-sale-002` (earbuds, $99 ×500), `flash-sale-003` (sneakers, $249 ×250) —
-each with a live active window so a fresh demo is immediately running.
+one in each of the three window states, so the catalog shows the state machine
+before you buy anything:
+
+| Sale | Window | Shows |
+| ---- | ------ | ----- |
+| `flash-sale-001` | `now - 5m` → `now + 60m` | **active** — the live drop, and the one every alias route, the test suites and the load harness point at |
+| `flash-sale-002` | `now - 3h` → `now - 2h` | **ended** — Buy Now answers `410` |
+| `flash-sale-003` | `now + 2h` → `now + 26h` | **upcoming** — the badge counts down, Buy Now answers `425` |
+
+The day-long lead time on the upcoming drop is deliberate: it is still `starts
+soon` when someone first opens the demo rather than having elapsed. Only the
+timing is staged — no seeded sale carries an invented `sold_count`, so the ended
+drop honestly shows 0 sold.
+
+Each sale is re-staged independently, on the state its own window describes, and
+that is load-bearing rather than incidental. A blanket "refresh any sale whose
+window has closed" rule would match the deliberately ended drop — a closed window
+is what ended *means* — and quietly resurrect it to live on the next migrate, so
+the catalog would look right once and then drift back to three live sales. The
+live drop is the one the suites depend on, so it is the one that stays live: it
+is left strictly alone while it is running, and re-armed if it dies.
 
 ## Configuration
 
@@ -468,9 +500,11 @@ npm run e2e:ui                # watch mode with the Playwright UI
 Fastify API, the Vite SPA (with `/api` proxied to the API), and straight-to-
 Postgres ground truth. No mocks: each test creates its own sale through the
 real admin API (`makeSale` fixture) and deletes it afterwards, so the shared
-dev DB's catalog stays clean. A `globalSetup` re-arms the three demo sales and
-flushes the advisory Redis keys before running — so `npm run test:e2e` never
-needs a manual reset, even after a load test has sold stock out.
+dev DB's catalog stays clean. A `globalSetup` re-arms the three demo sales —
+each back in its staged window, so the suite does not flatten the catalog into
+three live sales — and flushes the advisory Redis keys before running, so
+`npm run test:e2e` never needs a manual reset, even after a load test has sold
+stock out.
 
 The three spec files cover the demo page's buy flow and per-user limits
 (`src/tests/demo.spec.ts`), the sale-window invariants (upcoming / ended /
@@ -535,7 +569,11 @@ STRESS_SALES=flash-sale-001,flash-sale-002,flash-sale-003 STRESS_SSE_WATCHERS=10
 
 Each run is self-contained: on start every sale in the list is **re-armed**
 (purchases wiped, `sold_count` zeroed, stock re-seeded, active window set,
-Redis fast-path flushed), so it never depends on a stale seed. On stop it
+Redis fast-path flushed), so it never depends on a stale seed. The harness
+deliberately ignores the staged windows and forces a live one, because load
+belongs on a running sale — so a run that includes `flash-sale-002` or
+`flash-sale-003` leaves them live, and `npm run db:migrate` puts the catalog back
+into its staged states afterwards. On stop it
 **verifies the three invariants straight from Postgres** per sale and exits
 non-zero on any violation:
 

@@ -1,3 +1,14 @@
+# Dev dependencies only — Postgres and Redis, published on the host so the npm
+# scripts (`npm run dev:server`, `npm test`, `npm run stress`) can reach them.
+# The one-command full stack lives in `docker-compose.full.yml`.
+#
+# The explicit project name is load-bearing: without it Compose derives the
+# project (and therefore the `pgdata` volume) name from the directory holding
+# this file, so the database was called `infra_pgdata` and every clone on the
+# machine silently shared it. Naming the project makes the volume
+# `flash-sale_pgdata` — same sharing, but visibly deliberate.
+name: flash-sale
+
 services:
   postgres:
     image: postgres:16-alpine

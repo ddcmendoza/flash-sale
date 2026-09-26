@@ -73,7 +73,14 @@ esac
 cleanup() {
   echo ">> stopping '${CONTAINER}'"
   docker rm -f "${CONTAINER}" >/dev/null 2>&1 || true
+  rm -f "${RUN_ERR}"
 }
+# Scratch space for `docker run` stderr. It used to be written to
+# stress/docker/.run.err inside the source tree, which is not gitignored: an
+# interrupted bench run left a stray file in a git checkout, and two
+# concurrent runs overwrote each other's diagnostics. Each run gets its own
+# temp file and the EXIT trap takes it away.
+RUN_ERR="$(mktemp -t flash-sale-bench-run.XXXXXX)"
 trap cleanup EXIT INT TERM
 
 docker rm -f "${CONTAINER}" >/dev/null 2>&1 || true
@@ -100,17 +107,15 @@ while [ "$tried" -lt 10 ] && [ -z "$found" ]; do
     -e DATABASE_URL="${DATABASE_URL}" \
     -e REDIS_URL="${REDIS_URL}" \
     ${SERVER_ENV} \
-    "${IMAGE}" >/dev/null 2>"${ROOT}/stress/docker/.run.err"; then
-    reason="$(grep -oE 'Bind for 0.0.0.0:[0-9]+ failed|port is already allocated|address already in use' "${ROOT}/stress/docker/.run.err" 2>/dev/null | tail -1)"
-    [ -n "$reason" ] || reason="$(tail -1 "${ROOT}/stress/docker/.run.err" 2>/dev/null)"
+    "${IMAGE}" >/dev/null 2>"${RUN_ERR}"; then
+    reason="$(grep -oE 'Bind for 0.0.0.0:[0-9]+ failed|port is already allocated|address already in use' "${RUN_ERR}" 2>/dev/null | tail -1)"
+    [ -n "$reason" ] || reason="$(tail -1 "${RUN_ERR}" 2>/dev/null)"
     echo "!! docker run failed (${CONTAINER}): ${reason}"
     # A failed -d run can still create the container record; drop it so the
     # next attempt can reuse the name.
     docker rm -f "${CONTAINER}" >/dev/null 2>&1 || true
-    rm -f "${ROOT}/stress/docker/.run.err"
     continue
   fi
-  rm -f "${ROOT}/stress/docker/.run.err"
 
   echo ">> waiting for health at http://localhost:${PORT}/healthz"
   waited=0

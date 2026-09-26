@@ -8,6 +8,24 @@ import type { SaleGateState, SalesRepo } from '../repos/sales';
 
 const STATUS_CACHE_TTL_SECONDS = 1;
 
+/**
+ * Lifetime of a `purchased` dedupe marker.
+ *
+ * The marker is a *fast path*, not a record: `UNIQUE (sale_id, user_id)` is the
+ * hard stop for double-wins, so when a marker expires the worst a repeat buyer
+ * gets is one extra transaction, which then returns the same 409 from Postgres.
+ * That is what makes it safe to bound the marker's life.
+ *
+ * It has to be bounded. Without a TTL every unique winner leaves a permanent
+ * key — a sale with a million winners leaves a million keys, in a system whose
+ * entire subject is a flood of unique users, and the only things that ever
+ * reclaimed them were an admin reset or a load-test re-arm. Ten minutes is far
+ * longer than any realistic repeat-buyer burst (the 30-60s floods in the
+ * harness) and far shorter than the lifetime of a sale, so the cache is bounded
+ * while the fast path still does its job where it matters.
+ */
+const PURCHASED_MARKER_TTL_SECONDS = 600;
+
 function statusCacheKey(saleId: string): string {
   return `sale:${saleId}:status`;
 }
@@ -119,10 +137,16 @@ export class PurchaseGate {
   }
 
   /** Mark a just-committed purchase. Best-effort; never gating, never awaited
-   * by callers that must respond fast. */
+   * by callers that must respond fast. Written with an expiry so the dedupe
+   * set cannot grow without bound (see PURCHASED_MARKER_TTL_SECONDS). */
   async markPurchased(saleId: string, userId: string): Promise<void> {
     await this.redis
-      .set(purchasedCacheKey(saleId, userId), '1')
+      .set(
+        purchasedCacheKey(saleId, userId),
+        '1',
+        'EX',
+        PURCHASED_MARKER_TTL_SECONDS,
+      )
       .catch(() => {});
   }
 

@@ -1,4 +1,5 @@
 import fastify, {
+  LogController,
   type FastifyInstance,
   type FastifyServerOptions,
 } from 'fastify';
@@ -14,6 +15,7 @@ import {
 import { pgPlugin } from './plugins/pg';
 import { redisPlugin } from './plugins/redis';
 import { servicesPlugin } from './plugins/services';
+import { attachPoolErrorLogger } from './db/pool';
 import { healthRoutes } from './routes/health';
 import { salesRoutes } from './routes/sales';
 import { saleStatusRoutes } from './routes/saleStatus';
@@ -66,11 +68,30 @@ export function buildApp(opts: BuildAppOptions = {}): BuiltApp {
   const ownedPool = opts.pool === undefined;
   const ownedRedis = opts.redis === undefined;
   const pool = opts.pool ?? new Pool({ connectionString: cfg.databaseUrl, ...opts.poolConfig });
+  if (ownedPool) attachPoolErrorLogger(pool, 'pool');
   const redis = opts.redis ?? createAdvisoryRedis(cfg.redisUrl, 'advisory');
 
   const app: FastifyInstance = fastify({
     logger: opts.logger ?? false,
     trustProxy: true,
+    // Per-request logging is a `debug` line, not an `info` one — see the
+    // onResponse hook below. Fastify's built-in request logs are two `info`
+    // lines per request, which on a 183k-request load run is 360,390 lines of
+    // noise with no level control over them.
+    logController: new LogController({ disableRequestLogging: true }),
+  });
+
+  app.addHook('onResponse', (request, reply, done) => {
+    request.log.debug(
+      {
+        method: request.method,
+        url: request.url,
+        statusCode: reply.statusCode,
+        responseTime: reply.elapsedTime,
+      },
+      'request completed',
+    );
+    done();
   });
 
   app.register(pgPlugin, { pool, closeOnClose: ownedPool });

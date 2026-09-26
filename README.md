@@ -343,6 +343,7 @@ Environment variables, read once at startup (`apps/server/src/config.ts`):
 | `SALE_TOTAL_QUANTITY` | `1000` |
 | `SALE_START_AT` / `SALE_END_AT` | ISO timestamps; fall back to a live window (`-5m` / `+60m`) |
 | `PURCHASE_MODE` | `sync` (or `queue`) |
+| `LOG_LEVEL` | `info` — per-request lines are `debug`, so the default is quiet and `LOG_LEVEL=debug` turns the full request trace back on |
 
 ## Testing
 

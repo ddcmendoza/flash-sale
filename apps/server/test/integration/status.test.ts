@@ -24,7 +24,7 @@ describe('GET /api/sale/status', () => {
 
   afterAll(async () => {
     for (const saleId of created) {
-      await deleteSale(pool, saleId);
+      await deleteSale(pool, redis, saleId);
     }
     await pool.end();
     await closeRedis(redis);

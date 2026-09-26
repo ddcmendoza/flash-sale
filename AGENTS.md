@@ -97,6 +97,22 @@ npm run db:down            # stop containers
   `410 sold_out | ended` / `425 upcoming` / `202 accepted` (queue mode).
 - Env config is read once in `apps/server/src/config.ts`; defaults documented
   there. Never hardcode secrets; dev creds are local-only.
+- Per-request logging is one `debug` line from an `onResponse` hook, not
+  Fastify's two `info` lines (set `logController: new LogController({ disableRequestLogging: true })`).
+  `LOG_LEVEL=info` is the default and therefore quiet per request;
+  `LOG_LEVEL=debug` restores the trace. A load run writes 6 lines, not one per
+  request.
+- Both the `pg.Pool` and every ioredis client (advisory, subscriber, BullMQ
+  producer/worker) get an `error` listener at construction. Without one, an
+  unhandled `error` event crashes the process during a database blip — see
+  `attachPoolErrorLogger` and `attachRedisErrorLogger`.
+- Advisory Redis writes that are per-buyer (`PurchaseGate.markPurchased`) carry
+  a TTL. Dedupe is a fast path, not a record: `UNIQUE (sale_id, user_id)` is the
+  hard stop, so a marker that expires costs one extra transaction, while a marker
+  that never expires is a permanent key per unique winner.
+- Test teardown uses `deleteSale(pool, redis, saleId)`, which clears the sale's
+  Postgres rows *and* its `sale:<id>:*` Redis keys. The suite runs against the
+  shared dev services; a teardown that leaks either pollutes the next test.
 
 ## Testing
 
@@ -139,5 +155,5 @@ npm run db:down            # stop containers
 | ------- | ---- |
 | Fastify API | 3000 |
 | Vite dev server | 5173 |
-| Postgres | 5432 |
+| Postgres | 5433 (host) → 5432 (container) |
 | Redis | 6379 |

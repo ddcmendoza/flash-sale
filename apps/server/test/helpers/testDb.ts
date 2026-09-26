@@ -66,9 +66,21 @@ export async function clearRedisKeysForSale(redis: Redis, saleId: string): Promi
   if (keys.length > 0) await redis.del(keys);
 }
 
-/** Remove a sale and its purchases. Use in test teardowns so random sale ids
- * don't accumulate in the shared dev database (they show up in GET /api/sales). */
-export async function deleteSale(pool: Pool, saleId: string): Promise<void> {
+/** Remove a sale and every trace of it. Use in test teardowns so random sale
+ * ids don't accumulate in the shared dev database (they show up in
+ * GET /api/sales) and so the suite doesn't accumulate Redis state either.
+ *
+ * The Redis half is not optional bookkeeping. A purchase writes a `purchased`
+ * dedupe marker, and those markers outlive the rows: a teardown that deleted
+ * only the Postgres rows left `sale:<id>:purchased:*` behind forever. They are
+ * invisible until a test reuses a sale id and gets a 409 for a purchase row
+ * that no longer exists — so this takes the redis client and clears both. */
+export async function deleteSale(
+  pool: Pool,
+  redis: Redis,
+  saleId: string,
+): Promise<void> {
+  await clearRedisKeysForSale(redis, saleId);
   await pool.query('DELETE FROM purchases WHERE sale_id = $1', [saleId]);
   await pool.query('DELETE FROM sales WHERE id = $1', [saleId]);
 }

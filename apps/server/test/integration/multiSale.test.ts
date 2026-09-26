@@ -40,7 +40,7 @@ describe('multi-sale catalog + per-sale isolation + SSE live stream', () => {
   afterAll(async () => {
     await app.close();
     for (const saleId of created) {
-      await deleteSale(pool, saleId);
+      await deleteSale(pool, redis, saleId);
     }
     await pool.end();
     await closeRedis(redis);

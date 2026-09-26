@@ -34,7 +34,7 @@ describe('POST /api/purchase (queue mode — 202 + worker)', () => {
 
   afterAll(async () => {
     await app.close();
-    await deleteSale(pool, SALE_ID);
+    await deleteSale(pool, redis, SALE_ID);
     await pool.end();
     await closeRedis(redis);
   });

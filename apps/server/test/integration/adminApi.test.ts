@@ -43,7 +43,7 @@ describe('admin management API', () => {
 
   afterAll(async () => {
     await app.close();
-    for (const saleId of created) await deleteSale(pool, saleId);
+    for (const saleId of created) await deleteSale(pool, redis, saleId);
     await pool.end();
     await closeRedis(redis);
   });

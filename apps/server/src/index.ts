@@ -2,7 +2,10 @@ import { buildApp } from './app';
 import { config } from './config';
 
 async function main(): Promise<void> {
-  const { app } = buildApp({ logger: true, purchaseMode: config.purchaseMode });
+  const { app } = buildApp({
+    logger: { level: config.logLevel },
+    purchaseMode: config.purchaseMode,
+  });
 
   const shutdown = async (signal: string): Promise<void> => {
     app.log.info({ signal }, 'shutting down');

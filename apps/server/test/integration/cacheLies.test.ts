@@ -40,7 +40,7 @@ describe('purchase decisions ignore the cached status snapshot', () => {
 
   afterAll(async () => {
     await app.close();
-    for (const saleId of saleIds) await deleteSale(pool, saleId);
+    for (const saleId of saleIds) await deleteSale(pool, redis, saleId);
     await pool.end();
     await closeRedis(redis);
   });

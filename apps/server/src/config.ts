@@ -13,6 +13,14 @@ export interface EnvConfig {
   saleStartAt: string | null;
   saleEndAt: string | null;
   purchaseMode: PurchaseMode;
+  /**
+   * pino level for the server process. Per-request lines are emitted at
+   * `debug`, so the default `info` keeps the startup/shutdown/error lines and
+   * drops the request trace — one 183k-request run used to write 360,390 log
+   * lines with no way to turn them off. `LOG_LEVEL=debug` restores the full
+   * trace, `LOG_LEVEL=warn` or `silent` makes the server quiet.
+   */
+  logLevel: string;
 }
 
 export function loadConfig(env: NodeJS.ProcessEnv = process.env): EnvConfig {
@@ -29,6 +37,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): EnvConfig {
     saleStartAt: env.SALE_START_AT ?? null,
     saleEndAt: env.SALE_END_AT ?? null,
     purchaseMode: env.PURCHASE_MODE === 'queue' ? 'queue' : 'sync',
+    logLevel: env.LOG_LEVEL ?? 'info',
   };
 }
 

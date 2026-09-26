@@ -38,6 +38,7 @@ describe('db:migrate seeds a demo that is always purchasable', () => {
     saleStartAt: null,
     saleEndAt: null,
     purchaseMode: 'sync',
+    logLevel: 'info',
     ...over,
   });
 
@@ -47,7 +48,7 @@ describe('db:migrate seeds a demo that is always purchasable', () => {
   });
 
   afterAll(async () => {
-    for (const saleId of saleIds) await deleteSale(pool, saleId);
+    for (const saleId of saleIds) await deleteSale(pool, redis, saleId);
     await pool.end();
     await closeRedis(redis);
   });

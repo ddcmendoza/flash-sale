@@ -1,3 +1,12 @@
-locust>=2.30
-psycopg[binary]>=3.2
-redis>=5.0
+# Pinned, not ranged.
+#
+# These are the versions the numbers in README.md's mode-comparison table were
+# recorded with, and the ones CI runs. Open upper bounds (`locust>=2.30`)
+# resolve to whatever is newest on the day someone runs the harness, so a
+# benchmark can change its own methodology between two runs of the same command
+# — which is exactly what a reviewer is right to be suspicious of.
+#
+# Re-pin deliberately, and re-record the table when you do.
+locust==2.46.6
+psycopg[binary]==3.3.6
+redis==8.1.0

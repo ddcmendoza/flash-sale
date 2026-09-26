@@ -40,7 +40,7 @@ describe('POST /api/purchase (sync mode)', () => {
 
   afterAll(async () => {
     await app.close();
-    await deleteSale(pool, SALE_ID);
+    await deleteSale(pool, redis, SALE_ID);
     await pool.end();
     await closeRedis(redis);
   });

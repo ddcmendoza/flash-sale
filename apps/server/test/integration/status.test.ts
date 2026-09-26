@@ -1,6 +1,7 @@
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import type { SaleStatusResponse } from '@flash-sale/shared';
 import { buildApp } from '../../src/app';
+import { closeRedis } from '../../src/redis/client';
 import {
   createTestPool,
   createTestRedis,
@@ -26,7 +27,7 @@ describe('GET /api/sale/status', () => {
       await deleteSale(pool, saleId);
     }
     await pool.end();
-    await redis.quit();
+    await closeRedis(redis);
   });
 
   async function statusFor(

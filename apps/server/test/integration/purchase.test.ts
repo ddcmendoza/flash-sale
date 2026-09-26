@@ -1,6 +1,7 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import type { FastifyInstance } from 'fastify';
 import { buildApp } from '../../src/app';
+import { closeRedis } from '../../src/redis/client';
 import {
   createTestPool,
   createTestRedis,
@@ -41,7 +42,7 @@ describe('POST /api/purchase (sync mode)', () => {
     await app.close();
     await deleteSale(pool, SALE_ID);
     await pool.end();
-    await redis.quit();
+    await closeRedis(redis);
   });
 
   function buy(userId: string) {

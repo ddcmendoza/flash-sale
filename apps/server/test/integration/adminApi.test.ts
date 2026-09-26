@@ -3,6 +3,7 @@ import type { FastifyInstance } from 'fastify';
 import type { AddressInfo } from 'node:net';
 import { randomUUID } from 'node:crypto';
 import { buildApp } from '../../src/app';
+import { closeRedis } from '../../src/redis/client';
 import { createTestPool, createTestRedis, deleteSale, readStock } from '../helpers/testDb';
 import type { Pool } from 'pg';
 import type { Redis } from 'ioredis';
@@ -44,7 +45,7 @@ describe('admin management API', () => {
     await app.close();
     for (const saleId of created) await deleteSale(pool, saleId);
     await pool.end();
-    await redis.quit();
+    await closeRedis(redis);
   });
 
   async function createSale(

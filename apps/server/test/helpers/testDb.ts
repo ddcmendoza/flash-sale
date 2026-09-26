@@ -2,6 +2,7 @@ import { Pool, type PoolConfig } from 'pg';
 import { Redis } from 'ioredis';
 import { randomUUID } from 'node:crypto';
 import { config } from '../../src/config';
+import { createAdvisoryRedis } from '../../src/redis/client';
 
 export interface TestSaleSeed {
   saleId?: string;
@@ -19,8 +20,10 @@ export function createTestPool(poolConfig?: PoolConfig): Pool {
   return new Pool({ connectionString: config.databaseUrl, max: 25, ...poolConfig });
 }
 
+/** The same advisory client the server builds, so the tests exercise the real
+ * fail-fast options rather than a permissive test-only client. */
 export function createTestRedis(): Redis {
-  return new Redis(config.redisUrl, { maxRetriesPerRequest: null });
+  return createAdvisoryRedis(config.redisUrl, 'test');
 }
 
 /**

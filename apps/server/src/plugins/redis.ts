@@ -1,5 +1,6 @@
 import fp from 'fastify-plugin';
 import type { Redis } from 'ioredis';
+import { closeRedis } from '../redis/client';
 
 declare module 'fastify' {
   interface FastifyInstance {
@@ -18,7 +19,9 @@ export const redisPlugin = fp(
     fastify.decorate('redis', opts.redis);
     if (opts.closeOnClose) {
       fastify.addHook('onClose', async () => {
-        await opts.redis.quit();
+        // Advisory clients reject (not park) when Redis is unreachable, so a
+        // failed graceful quit must never block shutdown.
+        await closeRedis(opts.redis);
       });
     }
   },

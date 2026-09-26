@@ -3,6 +3,7 @@ import type { FastifyInstance } from 'fastify';
 import type { AddressInfo } from 'node:net';
 import { get } from 'node:http';
 import { buildApp } from '../../src/app';
+import { closeRedis } from '../../src/redis/client';
 import {
   createTestPool,
   createTestRedis,
@@ -42,7 +43,7 @@ describe('multi-sale catalog + per-sale isolation + SSE live stream', () => {
       await deleteSale(pool, saleId);
     }
     await pool.end();
-    await redis.quit();
+    await closeRedis(redis);
   });
 
   async function freshSale(id: string, totalQuantity = 10): Promise<string> {

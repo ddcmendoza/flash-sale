@@ -5,6 +5,12 @@ import fastify, {
 import { Pool, type PoolConfig } from 'pg';
 import { Redis } from 'ioredis';
 import { config, type EnvConfig, type PurchaseMode } from './config';
+import {
+  attachRedisErrorLogger,
+  BULLMQ_REDIS_OPTIONS,
+  closeRedis,
+  createAdvisoryRedis,
+} from './redis/client';
 import { pgPlugin } from './plugins/pg';
 import { redisPlugin } from './plugins/redis';
 import { servicesPlugin } from './plugins/services';
@@ -60,7 +66,7 @@ export function buildApp(opts: BuildAppOptions = {}): BuiltApp {
   const ownedPool = opts.pool === undefined;
   const ownedRedis = opts.redis === undefined;
   const pool = opts.pool ?? new Pool({ connectionString: cfg.databaseUrl, ...opts.poolConfig });
-  const redis = opts.redis ?? new Redis(cfg.redisUrl, { maxRetriesPerRequest: null });
+  const redis = opts.redis ?? createAdvisoryRedis(cfg.redisUrl, 'advisory');
 
   const app: FastifyInstance = fastify({
     logger: opts.logger ?? false,
@@ -81,7 +87,12 @@ export function buildApp(opts: BuildAppOptions = {}): BuiltApp {
   // subscribe mode can't issue commands); the main `redis` connection doubles
   // as the publisher. Best effort — a Redis blip degrades live push, never
   // correctness.
+  //
+  // `duplicate()` copies connection *options* but not listeners, so the
+  // subscriber needs its own error handler: without one, an unhandled `error`
+  // event during an outage would crash the process instead of just SSE.
   const liveSubRedis = redis.duplicate();
+  attachRedisErrorLogger(liveSubRedis, 'sse-subscriber');
   const liveBus = new LiveBus(redis, liveSubRedis);
   const liveStatusBroadcaster = new LiveStatusBroadcaster(liveBus, saleStatusService);
   void liveBus.start();
@@ -96,8 +107,13 @@ export function buildApp(opts: BuildAppOptions = {}): BuiltApp {
   let queue: ReturnType<typeof createPurchaseQueue> | undefined;
 
   if (cfg.purchaseMode === 'queue') {
-    queueRedis = new Redis(cfg.redisUrl, { maxRetriesPerRequest: null });
-    workerRedis = new Redis(cfg.redisUrl, { maxRetriesPerRequest: null });
+    // BullMQ's own contract: blocking commands + `maxRetriesPerRequest: null`
+    // (see BULLMQ_REDIS_OPTIONS). The error listeners are still required —
+    // ioredis without one crashes the process on the first reconnect attempt.
+    queueRedis = new Redis(cfg.redisUrl, BULLMQ_REDIS_OPTIONS);
+    workerRedis = new Redis(cfg.redisUrl, BULLMQ_REDIS_OPTIONS);
+    attachRedisErrorLogger(queueRedis, 'bullmq-producer');
+    attachRedisErrorLogger(workerRedis, 'bullmq-worker');
     queue = createPurchaseQueue(queueRedis);
     producer = new BullPurchaseProducer(queue);
     worker = startPurchaseWorker({
@@ -137,11 +153,11 @@ export function buildApp(opts: BuildAppOptions = {}): BuiltApp {
   app.addHook('onClose', async () => {
     liveStatusBroadcaster.stop();
     await liveSubRedis.punsubscribe().catch(() => {});
-    await liveSubRedis.quit().catch(() => {});
+    await closeRedis(liveSubRedis);
     await worker?.close();
     await queue?.close();
-    await queueRedis?.quit();
-    await workerRedis?.quit();
+    if (queueRedis) await closeRedis(queueRedis);
+    if (workerRedis) await closeRedis(workerRedis);
   });
 
   return { app, pool, redis, worker };

@@ -31,11 +31,27 @@ export class LiveBus {
   async start(): Promise<void> {
     if (this.started) return;
     this.started = true;
-    await this.sub.psubscribe(CHANNEL_PATTERN);
     this.sub.on('pmessage', (_pattern, channel, message) => {
       const saleId = channel.slice(CHANNEL_PREFIX.length + 1);
       this.dispatch(saleId, message);
     });
+    // Advisory connections run with `enableOfflineQueue: false`, so a psubscribe
+    // issued before the socket is ready — a cold start against a Redis that is
+    // still booting or is down — rejects instead of queueing. Re-arm on the next
+    // 'ready' so the fan-out still comes up once Redis is reachable. Once a
+    // subscribe has succeeded, ioredis re-issues it on every reconnect itself
+    // (`autoResubscribe`), so this only covers the initial subscribe.
+    this.sub.on('ready', () => void this.subscribe());
+    await this.subscribe();
+  }
+
+  private async subscribe(): Promise<void> {
+    try {
+      await this.sub.psubscribe(CHANNEL_PATTERN);
+    } catch {
+      // Redis unavailable: SSE fan-out is down, correctness is not. The next
+      // 'ready' re-arms the subscription.
+    }
   }
 
   on(

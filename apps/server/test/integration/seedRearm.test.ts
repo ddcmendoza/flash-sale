@@ -18,13 +18,22 @@ import type { Redis } from 'ioredis';
  * later every demo sale exists with a closed window and the reviewer sees ENDED
  * everywhere and 410 from every Buy Now.
  *
- * The seed is now self-healing, and these tests pin both halves of that: a
- * closed demo sale is re-armed, and a live one is left strictly alone.
+ * The seed is now self-healing, and these tests pin both halves of that: a demo
+ * sale that has drifted out of its seeded state is re-staged, and one already in
+ * its seeded state is left strictly alone. The catalog is staged to show the
+ * whole state machine — one ended, one live, one upcoming — so "re-staged" means
+ * "put back in the state its own window describes", not "made live".
  */
 describe('db:migrate seeds a demo that is always purchasable', () => {
   let pool: Pool;
   let redis: Redis;
-  const saleIds = ['flash-sale-002', 'flash-sale-003', 'rearm-default', 'rearm-pinned'];
+  const saleIds = [
+    'flash-sale-002',
+    'flash-sale-003',
+    'rearm-default',
+    'rearm-pinned',
+    'rearm-states',
+  ];
 
   const cfg = (saleId: string, over: Partial<EnvConfig> = {}): EnvConfig => ({
     host: '0.0.0.0',
@@ -68,6 +77,26 @@ describe('db:migrate seeds a demo that is always purchasable', () => {
       [saleId],
     );
     return rows[0]?.live === true;
+  }
+
+  /**
+   * The state each sale is in, straight from Postgres. The rule is spelled out
+   * in SQL rather than reusing the app's resolver, so a bug in the resolver
+   * cannot make a wrong seed look right.
+   */
+  async function readStates(ids: string[]): Promise<Record<string, string>> {
+    const { rows } = await pool.query<{ id: string; state: string }>(
+      `SELECT id,
+              CASE WHEN start_at > now()          THEN 'upcoming'
+                   WHEN end_at < now()            THEN 'ended'
+                   WHEN sold_count >= total_quantity THEN 'sold_out'
+                   ELSE 'active'
+              END AS state
+         FROM sales
+        WHERE id = ANY($1::text[])`,
+      [ids],
+    );
+    return Object.fromEntries(rows.map((r) => [r.id, r.state]));
   }
 
   it('re-arms a closed demo sale: live window, zeroed stock, no orphan rows', async () => {
@@ -119,18 +148,66 @@ describe('db:migrate seeds a demo that is always purchasable', () => {
     });
   });
 
-  it('re-arms the fixed demo sales too, not just the configured default', async () => {
+  it('stages the fixed demo sales as ended and upcoming, and keeps them that way', async () => {
     await seedSales(pool, cfg('rearm-default'));
-    for (const saleId of ['flash-sale-002', 'flash-sale-003']) {
-      await closeWindow(saleId);
-      expect(await isLive(saleId)).toBe(false);
-    }
+
+    // The catalog is the demo: one ended drop, one upcoming drop, and the
+    // configured default live. `flash-sale-002` is deliberately ended, so the
+    // old `WHERE end_at <= now()` re-arm would match it on every run and
+    // resurrect it — that trap is the reason the refresh is scoped per sale.
+    expect(await readStates(['flash-sale-002', 'flash-sale-003', 'rearm-default'])).toEqual({
+      'flash-sale-002': 'ended',
+      'flash-sale-003': 'upcoming',
+      'rearm-default': 'active',
+    });
+
+    // Re-running with nothing stale touches nothing, ended sale included.
+    expect(await seedSales(pool, cfg('rearm-default'))).toEqual([]);
+    expect(await readStates(['flash-sale-002', 'flash-sale-003', 'rearm-default'])).toEqual({
+      'flash-sale-002': 'ended',
+      'flash-sale-003': 'upcoming',
+      'rearm-default': 'active',
+    });
+  });
+
+  it('re-stages a demo sale that drifted out of its seeded state', async () => {
+    await seedSales(pool, cfg('rearm-default'));
+
+    // Both staged sales opened up (hours later, the upcoming window arrived and
+    // someone re-armed the ended one by hand) and the live sale went stale in
+    // the other direction. Every one of them now sits in the wrong state.
+    await pool.query(
+      `UPDATE sales SET start_at = now() - interval '30 minutes',
+                        end_at   = now() + interval '90 minutes'
+        WHERE id IN ('flash-sale-002', 'flash-sale-003')`,
+    );
+    await pool.query(
+      `UPDATE sales SET start_at = now() + interval '30 minutes',
+                        end_at   = now() + interval '90 minutes'
+        WHERE id = 'rearm-default'`,
+    );
 
     const rearmed = await seedSales(pool, cfg('rearm-default'));
 
-    expect(rearmed).toEqual(expect.arrayContaining(['flash-sale-002', 'flash-sale-003']));
-    for (const saleId of ['flash-sale-002', 'flash-sale-003']) {
-      expect(await isLive(saleId)).toBe(true);
+    expect(rearmed).toEqual(
+      expect.arrayContaining(['flash-sale-002', 'flash-sale-003', 'rearm-default']),
+    );
+    expect(await readStates(['flash-sale-002', 'flash-sale-003', 'rearm-default'])).toEqual({
+      'flash-sale-002': 'ended',
+      'flash-sale-003': 'upcoming',
+      'rearm-default': 'active',
+    });
+  });
+
+  it('never stages sold_count: a seeded sale has no sales data to show', async () => {
+    await seedSales(pool, cfg('rearm-states'));
+
+    // Timing is staged, sales data is not. An ended drop honestly shows 0 sold.
+    for (const saleId of ['rearm-states', 'flash-sale-002', 'flash-sale-003']) {
+      expect(await readStock(pool, saleId)).toMatchObject({
+        soldCount: 0,
+        distinctPurchases: 0,
+      });
     }
   });
 
@@ -146,7 +223,8 @@ describe('db:migrate seeds a demo that is always purchasable', () => {
 
   it('honours a pinned window instead of computing one', async () => {
     // A fresh id, so this exercises the insert path with the pinned values
-    // rather than the re-arm path (which only fires on a closed window).
+    // rather than the re-stage path (which only fires on an existing row that
+    // has drifted out of its seeded state).
     const startAt = new Date(Date.now() - 60_000);
     const endAt = new Date(Date.now() + 3_600_000);
     await seedSales(

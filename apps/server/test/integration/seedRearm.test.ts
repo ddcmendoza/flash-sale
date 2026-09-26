@@ -171,6 +171,16 @@ describe('db:migrate seeds a demo that is always purchasable', () => {
       'flash-sale-003': 'upcoming',
       'rearm-default': 'active',
     });
+
+    // The cold path a first-time clone takes: no rows at all. The INSERT has to
+    // stage the same two states, not just default everything to live.
+    await deleteSale(pool, redis, 'flash-sale-002');
+    await deleteSale(pool, redis, 'flash-sale-003');
+    await seedSales(pool, cfg('rearm-default'));
+    expect(await readStates(['flash-sale-002', 'flash-sale-003'])).toEqual({
+      'flash-sale-002': 'ended',
+      'flash-sale-003': 'upcoming',
+    });
   });
 
   it('re-stages a demo sale that drifted out of its seeded state', async () => {

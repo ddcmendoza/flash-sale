@@ -80,7 +80,7 @@ export function buildApp(opts: BuildAppOptions = {}): BuiltApp {
   const purchasesRepo = new PurchasesRepo(pool);
   const now = opts.now ?? (() => new Date());
   const saleStatusService = new SaleStatusService(salesRepo, redis);
-  const purchaseGate = new PurchaseGate(redis, saleStatusService);
+  const purchaseGate = new PurchaseGate(redis, salesRepo);
   const purchaseService = new PurchaseService(pool, now);
 
   // Live SSE fan-out. The subscriber needs its own connection (a connection in

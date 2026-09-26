@@ -31,6 +31,10 @@ export interface AdminSalePatch {
   endAt?: Date;
 }
 
+/** What a purchase pre-check concludes. `open` means "proceed and let the
+ * authoritative transaction decide". */
+export type SaleGateState = 'open' | 'upcoming' | 'ended' | 'sold_out' | 'not_found';
+
 export function toSnapshot(row: SaleRow): SaleSnapshot {
   return {
     id: row.id,
@@ -92,6 +96,47 @@ export class SalesRepo {
     );
     const row = rows[0];
     return row ? toSnapshot(row) : null;
+  }
+
+  /**
+   * Authoritative, lock-free pre-check for the purchase path: can this sale be
+   * purchased right now, and if not, why?
+   *
+   * Why not the 1 s status cache: a cached `upcoming` / `ended` / `sold_out`
+   * refuses purchases Postgres considers legal for up to a second after a
+   * window opens or stock lands. That is a real bug, not a trade-off — it
+   * rejects legitimate buyers at the worst possible moment, the start of a sale.
+   *
+   * So the window is evaluated by the database against its own `now()` (never
+   * the client clock, never a cached timestamp), and the precedence matches
+   * `resolveSaleStatus` exactly: upcoming, then ended, then sold out.
+   *
+   * It is a plain MVCC SELECT: it takes no row lock, so it never blocks or
+   * serializes with concurrent sellers, and it is only a *pre-filter* — the
+   * conditional `UPDATE` inside `PurchaseService.attempt` still decides. A
+   * window that opens a millisecond after this read simply loses the race and is
+   * admitted by the transaction, which is the safe direction to be wrong in.
+   */
+  async findGateState(id: string): Promise<SaleGateState> {
+    const { rows } = await this.db.query<{
+      upcoming: boolean;
+      ended: boolean;
+      sold_out: boolean;
+    }>(
+      `SELECT
+         (now() < start_at)             AS upcoming,
+         (now() > end_at)               AS ended,
+         (sold_count >= total_quantity) AS sold_out
+       FROM sales
+       WHERE id = $1`,
+      [id],
+    );
+    const row = rows[0];
+    if (!row) return 'not_found';
+    if (row.upcoming) return 'upcoming';
+    if (row.ended) return 'ended';
+    if (row.sold_out) return 'sold_out';
+    return 'open';
   }
 
   /** Postgres is the source of truth; used by the stress harness + tests. */

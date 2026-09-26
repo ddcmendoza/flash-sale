@@ -111,12 +111,37 @@ defense.
 
 ### Redis is advisory, never gating
 
-- `PurchaseGate.alreadyPurchased()` short-circuits repeat buyers with an instant
-  `409` — but the authoritative duplicate stop is the UNIQUE constraint.
-- `SaleStatusService` computes status from Postgres and caches it in Redis for
-  ~1s; a `sold_out`/`ended`/`upcoming` peek can reject requests in <1ms.
-- Both fast paths are best-effort. A Redis flush only costs a few extra
-  round-trips to Postgres — never correctness.
+Redis answers exactly one question on the purchase path: *"has this user already
+won?"* — `PurchaseGate.alreadyPurchased()` returns an instant `409` for repeat
+buyers, and the authoritative duplicate stop is still the `UNIQUE` constraint.
+
+It used to answer a second one. The status snapshot is cached for ~1s, and the
+purchase path used to peek at it, which meant a cached `upcoming` / `ended` /
+`sold_out` could refuse a purchase Postgres considered legal — for up to a second
+after a window opened or stock landed, with nothing committed. That is a bug,
+not a trade-off, and it fires at the worst possible moment: the start of a sale,
+when everyone is hammering.
+
+So rejections no longer read the cache. `PurchaseGate.checkSaleState()` asks
+Postgres, with a plain lock-free `SELECT` that evaluates the window against PG
+`now()` and returns the same precedence as `resolveSaleStatus` (`upcoming`, then
+`ended`, then `sold_out`). It costs one cheap read to short-circuit doomed
+requests, which is what a 1s-stale cache was supposed to save, without the stale
+refusals. `open` is only a pre-filter verdict: the conditional `UPDATE` inside
+the transaction still decides, so the authoritative path is unchanged.
+
+`SaleStatusService` still caches status in Redis for ~1s, but only to serve
+`GET .../status` and the SSE frames — nothing is refused on it.
+
+Two failure modes are covered by tests rather than asserted in prose:
+
+| Failure | Result |
+|---|---|
+| Redis stopped mid-flood | 250 concurrent purchases on a 200-unit sale: **250/250 complete in ~305ms**, the same `200×201 / 50×410` split as the Redis-up baseline, and Postgres shows `sold_count=200`, 200 rows, 200 distinct users. |
+| Redis entry poisoned with a status that is false right now | The purchase goes through anyway (`test/integration/cacheLies.test.ts`). |
+
+Both fast paths are best-effort. A Redis flush costs a few extra round-trips to
+Postgres — never correctness.
 
 ### Multi-sale API
 

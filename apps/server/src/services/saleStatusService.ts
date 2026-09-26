@@ -1,11 +1,10 @@
 import type { Redis } from 'ioredis';
 import type {
   SaleSnapshot,
-  SaleStatus,
   SaleStatusResponse,
 } from '@flash-sale/shared';
 import { remaining, resolveSaleStatus } from '@flash-sale/shared';
-import type { SalesRepo } from '../repos/sales';
+import type { SaleGateState, SalesRepo } from '../repos/sales';
 
 const STATUS_CACHE_TTL_SECONDS = 1;
 
@@ -55,12 +54,6 @@ export class SaleStatusService {
     return this.render(sale, now);
   }
 
-  /** Fast-path read used by the purchase gate. Never authoritative. */
-  async peekStatus(saleId: string): Promise<SaleStatus | null> {
-    const cached = await this.readCache(saleId);
-    return cached ? cached.status : null;
-  }
-
   private render(sale: SaleSnapshot, now: Date = new Date()): SaleStatusResponse {
     return {
       status: resolveSaleStatus(sale, now),
@@ -98,11 +91,23 @@ export class SaleStatusService {
   }
 }
 
-/** Redis fast-path for purchases: instant 409s for repeat buyers. */
+/**
+ * The gate in front of the purchase path. Two fast paths, in this order:
+ *
+ *   1. `alreadyPurchased` — Redis dedupe for repeat buyers. This is the one
+ *      that pays for itself: it turns the repeat-buyer flood from a pile of
+ *      wasted transactions into sub-millisecond 409s. It can only be a false
+ *      positive if a purchase row exists, and the flag is set post-commit, so
+ *      a 409 here is never wrong.
+ *   2. `checkSaleState` — a fresh, lock-free read from Postgres. Deliberately
+ *      NOT the 1 s status cache: a cached `upcoming` / `ended` / `sold_out`
+ *      refuses buyers the database would admit for up to a second after a
+ *      window opens or stock lands, and that refusal is the bug this replaces.
+ */
 export class PurchaseGate {
   constructor(
     private readonly redis: Redis,
-    private readonly status: SaleStatusService,
+    private readonly sales: SalesRepo,
   ) {}
 
   /** True => this user has a committed purchase (safe; set post-commit). */
@@ -121,8 +126,14 @@ export class PurchaseGate {
       .catch(() => {});
   }
 
-  /** Advisory sale-state pre-check. `null` = unknown, caller should go to PG. */
-  async peekSaleStatus(saleId: string): Promise<SaleStatus | null> {
-    return this.status.peekStatus(saleId);
+  /**
+   * Can this sale be purchased right now? Read fresh from Postgres, evaluated
+   * against PG `now()`. `open` is a pre-filter verdict, not a decision: the
+   * transaction still decides. Only `not_found`, `upcoming`, `ended` and
+   * `sold_out` short-circuit, and each maps to the same HTTP status the
+   * transaction would have produced.
+   */
+  async checkSaleState(saleId: string): Promise<SaleGateState> {
+    return this.sales.findGateState(saleId);
   }
 }

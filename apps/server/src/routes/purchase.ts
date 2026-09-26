@@ -55,6 +55,9 @@ async function handlePurchase(
   }
 
   // --- Redis fast-path: instant rejects for repeat buyers ---
+  // Safe to reject from cache: the flag is only ever set after a commit, so a
+  // hit means a purchase row exists. This is what makes the repeat-buyer flood
+  // cheap, so it stays first.
   const purchased = await fastify.purchaseGate.alreadyPurchased(saleId, userId);
   if (purchased) {
     return reply
@@ -62,19 +65,26 @@ async function handlePurchase(
       .send(errorBody('already_purchased', 'You already purchased this item'));
   }
 
-  // --- Redis fast-path: advisory sale-state pre-check ---
-  const status = await fastify.purchaseGate.peekSaleStatus(saleId);
-  if (status === 'upcoming') {
+  // --- Authoritative sale-state pre-check (fresh from Postgres) ---
+  // Deliberately not the 1 s status cache: a cached `upcoming` / `ended` /
+  // `sold_out` refuses purchases Postgres considers legal for up to a second
+  // after a window opens or stock lands. This read is lock-free, evaluates the
+  // window against PG `now()`, and each refusal maps to exactly the status the
+  // authoritative transaction would have returned.
+  const gate = await fastify.purchaseGate.checkSaleState(saleId);
+  if (gate === 'not_found') {
+    return reply.code(404).send(errorBody('not_found', 'Sale not found'));
+  }
+  if (gate === 'upcoming') {
     return reply
       .code(425)
       .send(errorBody('upcoming', 'The sale has not started yet'));
   }
-  if (status === 'sold_out' || status === 'ended') {
-    return reply
-      .code(410)
-      .send(
-        errorBody(status, status === 'sold_out' ? 'Sold out' : 'The sale has ended'),
-      );
+  if (gate === 'ended') {
+    return reply.code(410).send(errorBody('ended', 'The sale has ended'));
+  }
+  if (gate === 'sold_out') {
+    return reply.code(410).send(errorBody('sold_out', 'Sold out'));
   }
 
   if (purchaseMode === 'queue') {

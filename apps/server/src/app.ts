@@ -120,6 +120,8 @@ export function buildApp(opts: BuildAppOptions = {}): BuiltApp {
       connection: workerRedis,
       purchaseService,
       gate: purchaseGate,
+      // Same post-commit snapshot refresh the sync path does on 201.
+      onCommitted: (saleId) => liveStatusBroadcaster.publishStatus(saleId),
     });
   } else {
     producer = {

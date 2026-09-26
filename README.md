@@ -1,5 +1,7 @@
 # Flash Sale
 
+**Source:** <https://github.com/ddcmendoza/flash-sale> · **License:** [MIT](LICENSE)
+
 A high-throughput **flash sale** demo for multiple concurrent drops with limited
 stock each. The system must enforce three invariants per sale even under a
 flood of concurrent purchase attempts:

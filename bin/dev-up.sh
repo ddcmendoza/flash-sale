@@ -48,8 +48,15 @@ compose() { docker compose -p "$PROJECT" -f "$COMPOSE_FILE" "$@"; }
 # tearing the stack down. A failed start that removes its own containers also
 # removes the only evidence of what went wrong, so every failure path routes
 # through here: explain first, then leave the evidence in place and say how to
-# clear it. Empty means "tear down normally" (the success path, or a usage error).
+# clear it. Empty means "tear down normally", which is only true once the stack
+# is actually up.
 LEAVE_NOTE=""
+
+# Set by a path that fails *before* anything is started — a usage error, a port
+# held by something else. There is nothing to tear down, and saying "stopping
+# the stack" when no container was ever created is a false statement about what
+# the script did, which is the one thing this script is not allowed to do.
+NOT_STARTED=0
 
 # Is this host port published by one of *our own* running containers? Used by the
 # port check so that a re-run after a failure does not trip over the leftovers
@@ -80,6 +87,7 @@ check_port_free() {
   echo "!! host port ${port} is already in use by something else."
   echo "!! Stop whatever is on it, or pick another:"
   echo "!!   API_PORT=3010 WEB_PORT=5180 $0"
+  NOT_STARTED=1
   exit 1
 }
 
@@ -161,6 +169,11 @@ cleanup() {
   if [ -n "$LEAVE_NOTE" ]; then
     echo
     echo "$LEAVE_NOTE"
+    exit $status
+  fi
+  if [ "$NOT_STARTED" -eq 1 ]; then
+    echo
+    echo ">> nothing was started, so there is nothing to stop."
     exit $status
   fi
   echo

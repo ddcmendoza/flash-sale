@@ -26,13 +26,20 @@ describe('db:migrate seeds a demo that is always purchasable', () => {
   let redis: Redis;
   const saleIds = ['flash-sale-002', 'flash-sale-003', 'rearm-default', 'rearm-pinned'];
 
-  const cfg = (saleId: string): EnvConfig =>
-    ({
-      saleId,
-      saleName: 'Rearm Test Sale',
-      salePriceCents: 19_900,
-      saleTotalQuantity: 1_000,
-    }) as EnvConfig;
+  const cfg = (saleId: string, over: Partial<EnvConfig> = {}): EnvConfig => ({
+    host: '0.0.0.0',
+    port: 3000,
+    databaseUrl: 'postgres://unused/unused',
+    redisUrl: 'redis://unused:6379',
+    saleId,
+    saleName: 'Rearm Test Sale',
+    salePriceCents: 19_900,
+    saleTotalQuantity: 1_000,
+    saleStartAt: null,
+    saleEndAt: null,
+    purchaseMode: 'sync',
+    ...over,
+  });
 
   beforeAll(() => {
     pool = createTestPool();
@@ -139,17 +146,17 @@ describe('db:migrate seeds a demo that is always purchasable', () => {
   it('honours a pinned window instead of computing one', async () => {
     // A fresh id, so this exercises the insert path with the pinned values
     // rather than the re-arm path (which only fires on a closed window).
-    const pinned = {
-      ...cfg('rearm-pinned'),
-      saleStartAt: new Date(Date.now() - 60_000),
-      saleEndAt: new Date(Date.now() + 3_600_000),
-    } as EnvConfig;
-    await seedSales(pool, pinned);
+    const startAt = new Date(Date.now() - 60_000);
+    const endAt = new Date(Date.now() + 3_600_000);
+    await seedSales(
+      pool,
+      cfg('rearm-pinned', { saleStartAt: startAt.toISOString(), saleEndAt: endAt.toISOString() }),
+    );
     const { rows } = await pool.query<{ start_at: Date; end_at: Date }>(
       'SELECT start_at, end_at FROM sales WHERE id = $1',
       ['rearm-pinned'],
     );
-    expect(rows[0]!.start_at.getTime()).toBe(pinned.saleStartAt!.getTime());
-    expect(rows[0]!.end_at.getTime()).toBe(pinned.saleEndAt!.getTime());
+    expect(rows[0]!.start_at.getTime()).toBe(startAt.getTime());
+    expect(rows[0]!.end_at.getTime()).toBe(endAt.getTime());
   });
 });

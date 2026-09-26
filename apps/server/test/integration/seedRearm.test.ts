@@ -1,5 +1,6 @@
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { seedSales } from '../../src/db/schema';
+import { config } from '../../src/config';
 import type { EnvConfig } from '../../src/config';
 import {
   createTestPool,
@@ -27,13 +28,11 @@ import type { Redis } from 'ioredis';
 describe('db:migrate seeds a demo that is always purchasable', () => {
   let pool: Pool;
   let redis: Redis;
-  const saleIds = [
-    'flash-sale-002',
-    'flash-sale-003',
-    'rearm-default',
-    'rearm-pinned',
-    'rearm-states',
-  ];
+  // Only the ids this suite owns. `flash-sale-002` / `flash-sale-003` are demo
+  // catalog rows the seed owns: deleting them here used to leave the shared dev
+  // DB with a one-sale catalog after every `npm test`, and they only came back
+  // on the next `db:migrate`.
+  const saleIds = ['rearm-default', 'rearm-pinned', 'rearm-states'];
 
   const cfg = (saleId: string, over: Partial<EnvConfig> = {}): EnvConfig => ({
     host: '0.0.0.0',
@@ -58,6 +57,10 @@ describe('db:migrate seeds a demo that is always purchasable', () => {
 
   afterAll(async () => {
     for (const saleId of saleIds) await deleteSale(pool, redis, saleId);
+    // Leave the catalog the way migrate leaves it: the staged demo sales in
+    // their seeded states, so `npm test` cannot quietly shrink the demo. Seeded
+    // with the real config, so this restores `flash-sale-001` too.
+    await seedSales(pool, config);
     await pool.end();
     await closeRedis(redis);
   });

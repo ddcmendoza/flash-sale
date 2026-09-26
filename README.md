@@ -527,7 +527,8 @@ STRESS_MODE=queue npm run bench -s -- -u 2000 --spawn-rate 2000 -t 60s --headles
 Head-to-head runs: three identical **60s bursts, 2,000 vusers spawned
 instantly** against each mode on the dockerized bench (2 CPUs / 256 MiB
 container), alternating sync → queue, each run re-armed from a clean slate
-(method + full command list: `tmp/COMPARE_RUNBOOK.md`). Latency in ms. Two load
+(method, exact commands, host specs and the standalone `verify.py` invocation:
+[`docs/COMPARISON.md`](docs/COMPARISON.md)). Latency in ms. Two load
 shapes: **stock 1,000** (contention is brief — the sale sells out under the
 spawn storm, then both modes run on fast-path 409/410) and **stock 10**
 (extreme contention — every attempt loses, only 10 rows are ever committed):

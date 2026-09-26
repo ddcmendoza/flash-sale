@@ -273,20 +273,26 @@ if [ "$web_ok" -ne 1 ]; then
   exit 1
 fi
 
-cat <<BANNER
+# The banner, with its right-hand border computed. Hand-padding a box around an
+# interpolated port only lines up for the port it was written against, and the
+# first thing anyone who read this script would do is change the port.
+BOX_W=62
+box_line() { printf '  │%-*s│\n' "$BOX_W" "  $1"; }
 
-  ┌──────────────────────────────────────────────────────────────┐
-  │  Flash sale is running.                                      │
-  │                                                              │
-  │    Open   http://localhost:${WEB_PORT}                        │
-  │    Admin  http://localhost:${WEB_PORT}/#/admin               │
-  │    API    http://localhost:${API_PORT}/api/sales             │
-  │                                                              │
-  │  The web app talks to the API through Vite's /api proxy, so   │
-  │  buy from the page, not from the API port.                   │
-  └──────────────────────────────────────────────────────────────┘
-
-BANNER
+{
+  echo
+  echo "  ┌$(printf '─%.0s' $(seq 1 "$BOX_W"))┐"
+  box_line "Flash sale is running."
+  box_line ""
+  box_line "  Open   http://localhost:${WEB_PORT}"
+  box_line "  Admin  http://localhost:${WEB_PORT}/#/admin"
+  box_line "  API    http://localhost:${API_PORT}/api/sales"
+  box_line ""
+  box_line "The web app talks to the API through Vite's /api proxy, so"
+  box_line "buy from the page, not from the API port."
+  echo "  └$(printf '─%.0s' $(seq 1 "$BOX_W"))┘"
+  echo
+}
 
 # The stack is verified up, so from here Ctrl-C is the ordinary "stop it" path
 # and the EXIT trap should tear down rather than preserve evidence.

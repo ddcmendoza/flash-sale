@@ -122,7 +122,17 @@ npm run db:down            # stop containers
   that never expires is a permanent key per unique winner.
 - Test teardown uses `deleteSale(pool, redis, saleId)`, which clears the sale's
   Postgres rows *and* its `sale:<id>:*` Redis keys. The suite runs against the
-  shared dev services; a teardown that leaks either pollutes the next test.
+  shared dev services; a teardown that leaks either pollutes the next test. Do
+  not delete the seed-owned demo sales (`flash-sale-00{1,2,3}`) in a teardown:
+  the seed re-creates them, so deleting them leaves the shared DB's catalog
+  short until the next `db:migrate`.
+- `db:migrate` stages the demo catalog to show the state machine: `flash-sale-001`
+  live, `-002` ended, `-003` upcoming, and it prints each sale's resolved state.
+  The re-arm in `apps/server/src/db/schema.ts` is therefore scoped per sale,
+  against the state that sale's own window describes. Do not "simplify" it back
+  to a blanket `end_at <= now()`: a deliberately ended sale has a closed window
+  by definition, so that predicate matches it and migrate resurrects it to live
+  on the next run.
 
 ## Testing
 
@@ -173,3 +183,10 @@ Ports 3000/5173 are shared by both stacks — `dev:up` (compose) and
 override with `API_PORT`/`WEB_PORT` on `dev:up`. The compose stack's own
 Postgres and Redis publish **nothing** to the host, so they never collide with
 5433/6379.
+
+## Maintaining this file
+
+Keep this file for knowledge useful to almost every future agent session in this project.
+Do not repeat what the codebase already shows; point to the authoritative file or command instead.
+Prefer rewriting or pruning existing entries over appending new ones.
+When updating this file, preserve this bar for all agents and keep entries concise.

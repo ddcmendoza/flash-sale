@@ -55,13 +55,19 @@ re-arms all sales on start regardless of mode).
   sale sells out under the spawn storm, then both modes settle onto the
   409/410 fast path. Queue ~ ties sync on latency and throughput here.
 - **Effort ≫ stock (e.g. `SALE_TOTAL_QUANTITY=10`)** — every attempt loses and
-  only 10 rows ever commit. Queue's p99 gets *worse* (the producer enqueues
-  ~every request, ~160k jobs, and the worker rejects them one-by-one), a small
-  mean/median edge appears in queue, and throughput stays a tie. This is the
-  honest shape for "does the queue offload the row-lock wait" questions.
+  only 10 rows ever commit. This is the honest shape for "does the queue
+  offload the row-lock wait" question, and the answer on the dockerized bench
+  is still a tie: throughput, median, p95 and p99 all overlap. What changes
+  is the *enqueue* count, which the route bounds by prechecking the sale in
+  Postgres before the enqueue hop (a few dozen to low hundreds of jobs, not
+  one per request).
 
 Recorded results (60s, 2,000 vusers spawned instantly, alternating ×3) live in
-README.md's "Mode comparison (sync vs queue, head-to-head)" section.
+README.md's "Mode comparison (sync vs queue, head-to-head)" section. If your
+numbers disagree with that table, record your host specs and treat the table as
+"a different machine" rather than an error — but do investigate a *structural*
+difference, e.g. `accepted` landing near your full request count, which means
+rejections are being served from a cache (see the SSE-watcher check below).
 
 Create the log directory once before starting, so the `tee`s below do not fail:
 
@@ -225,6 +231,35 @@ STRESS_MODE=queue STRESS_CPUS=4 STRESS_MEM=512m \
 
 Postgres/Redis run in their own containers on the host; they are shared by both
 modes, so differences are attributable to the write path, not the store.
+
+## Detecting cache-served rejections (the SSE-watcher signature)
+
+Purchase outcomes must come from Postgres, never from the advisory status
+cache. The way that goes wrong is quiet and load-dependent: the SSE
+reconciler is the only writer that refreshes the status snapshot when
+*nobody is subscribed*, so a cached rejection path makes both the enqueue
+rate and the response mix depend on whether a browser happens to have the
+stream open.
+
+Cheapest detector: run the same sustained load against two sales, one with a
+live SSE subscriber and one without, then compare the enqueue rate.
+
+```bash
+# queue mode is where the symptom is most visible (it returns 202 on enqueue)
+PURCHASE_MODE=queue npm run dev:server
+
+# in another shell: identical load to both sales, /events open on one only
+#   sale A: open `curl -N http://localhost:3000/api/sales/<A>/events`
+#   sale B: open nothing
+# expect: enqueue rate within a small factor on A and B
+```
+
+Measured with 2,000 vusers, 10 units, 8s: **0.2% enqueued on both** (with and
+without a subscriber). A build that answered rejections from the cache gave
+0.4% with a tab open and 100% without — a 279× swing. Treat any run where
+`accepted` approaches the full request count as this bug, not as a queue-mode
+characteristic. The same signature shows up in the table above as
+`accepted ≈ requests`.
 
 ## Cleanup / reset
 

@@ -17,7 +17,13 @@ for scale-out.
 ---
 ## AI Usage Disclosure
 
-Fully utilized the OpenCode's free model Big Pickle until usage limits is reached, mainly for scaffolding and all the boilerplates, plus writing the documentations. Main architectural decision were given as explicit prompts to the model.
+Built with AI assistance. I designed the architecture and the correctness model
+— Postgres as the sole source of truth, the single purchase transaction, the
+advisory-Redis boundary, and the sync/queue split — and drove those decisions
+explicitly. AI was used for scaffolding, boilerplate, and documentation. The
+history is the record — `git log` shows one author, granular commits in
+dependency order (`init` → shared → server → web → e2e → stress/bench). The
+design rationale in this README is mine and I can defend it line by line.
 
 ## Architecture
 

@@ -150,43 +150,54 @@ line:
 | req/s (aggregate) | `req/s` column | `req/s` column |
 | latency (median / p95 / p99) | percentile table | percentile table |
 | request failures | `# fails` column | `# fails` column |
-| **wins / accepted** | `VERIFY: PASS … N wins` | `VERIFY: PASS … N accepted` |
+| **wins / accepted** | `VERIFY: PASS … N wins` | `VERIFY: PASS … N accepted (M distinct buyers)` |
 
 Interpretation notes:
 
 - **`VERIFY: PASS` is the product gate in both modes** — all invariants (no
-  oversell, `sold_count == purchase rows`, window enforced) must hold under
-  load. A `VERIFY: FAIL` or non-zero exit means the mode is **broken under
-  load**, not just slower — stop and investigate before comparing throughput.
-  A `VERIFY: PASS` that reports **0 requests** is not a pass at all; the harness
-  fails the run in that case, so a green line always means load was applied.
+  oversell, `sold_count == purchase rows`, `sold_count == min(buyers, stock)`)
+  must hold under load, read from Postgres *after* the queue has drained. A
+  `VERIFY: FAIL` or non-zero exit means the mode is **broken under load**, not
+  just slower — stop and investigate before comparing throughput. A
+  `VERIFY: PASS` that reports **0 requests** is not a pass at all, and neither is
+  a `VERIFY: PARTIAL` (the queue never emptied, so the count was read mid-flight);
+  both exit non-zero, so a green line always means load was applied *and* the
+  sale settled.
 - In `sync`, `N wins` should equal `min(vusers, stock)`. In `queue`, `N accepted`
-  is the count of `202` responses — a user can collect several 202s before their
-  row commits (the producer's duplicate check races the worker's INSERT), so
-  `accepted` can exceed the number of distinct purchasers. The committed rows
-  still end at `min(vusers, stock)`. Under **effort ≫ stock** this explodes: the
-  producer enqueues ~every request (the sale sells out in the first milliseconds,
-  and the producer may not know without an authoritative read), so `accepted` ≈
-  total requests while committed rows stay at stock — and queue's p99 degrades
-  (the enqueue path pays for jobs the worker then rejects). Don't read
+  is the count of `202` responses and `M distinct buyers` is how many different
+  users got one — a user can collect several 202s before their row commits (the
+  producer's duplicate check races the worker's INSERT), so `N accepted` exceeds
+  `M` and `M` is the population the winner count is checked against:
+  `sold_count == min(M, stock)`.
+- **`accepted` is load-bounded, not "every request".** The route prechecks the
+  sale in Postgres before the enqueue hop, so a request only reaches the queue
+  while stock is still available. At stock 1,000 that was 2,847–2,920 jobs out of
+  ~188k requests (~1.5%); at stock 10, where the sale sells out in the first few
+  milliseconds, only 68–167 of ~179k requests were ever enqueued. Committed rows
+  are exactly stock in every case, and queue's p99 is a tie with sync's, not a
+  degradation — the enqueue path is not paying for jobs the worker rejects,
+  because the rejects never get enqueued in the first place. Don't read
   `accepted` as demand or success; read committed rows + failures + the buyer
   fast-paths instead.
 - **Queue semantics to read correctly**: `202 accepted` ≠ committed purchase at
-  that moment; the worker (16 concurrent, in-process) drains asynchronously.
-  Because the worker shares the API container's lifetime, job processing stops
-  when `npm run bench` removes the container on exit — whatever is still in the
-  handoffs queue is lost. In practice the worker drains in well under a second,
-  so on a 60s run every enqueued job commits well before teardown; but on a very
-  short burst (`-u`-heavy, tiny `-t`) a late few can be orphaned. Expect
-  `sold_count == min(spawned vusers, stock)` once drained. Confirm independently
-  after any queue run:
+  that moment; the worker (16 concurrent, in-process) drains asynchronously, and
+  stopping Locust does not stop it. The harness accounts for this: at run end it
+  polls the BullMQ keys to zero (`STRESS_DRAIN_TIMEOUT`, default 30s) and only
+  then reads Postgres, printing `drain: flash-sale-purchases empty after N.Ns`.
+  If the queue will not empty it says `VERIFY: PARTIAL` and exits non-zero
+  rather than certifying a moving target. Because the worker shares the API
+  container's lifetime, a *container* that is removed mid-drain does strand
+  whatever is left — that is the one case the harness cannot wait out, so a
+  queue run should be allowed to print its `drain:` line before you tear the
+  container down. Expect `sold_count == min(distinct accepted buyers, stock)`.
+  Confirm independently after any queue run:
 
   ```bash
   docker exec flash-sale-postgres psql -U flash -d flash_sale \
     -c "SELECT id, sold_count, total_quantity FROM sales WHERE id='flash-sale-001';"
   ```
 
-  If `sold_count` is below stock, check whether the run simply had fewer vusers
+  If `sold_count` is below stock, check whether the run simply had fewer buyers
   than stock before suspecting a problem.
 
 ## Verifying a run independently (`verify.py`)
@@ -261,6 +272,16 @@ without a subscriber). A build that answered rejections from the cache gave
 characteristic. The same signature shows up in the table above as
 `accepted ≈ requests`.
 
+One honest exception, so the detector does not fire on itself: `accepted`
+*does* legitimately approach the request count when the worker is not draining.
+Pausing the worker for the first 9s of a 10s, 500-vuser run produced 28,550
+accepted out of 30,218 requests — every request was enqueued, because with
+nothing committing, `sold_count` never rises and the Postgres precheck correctly
+keeps saying the sale has stock. The difference is visible in the log: that run
+ends in `drain: … still holds 21,472 job(s) … empty after 2.3s`, so the queue
+did empty. `accepted ≈ requests` **in a run whose queue drained** is the cache
+bug; `accepted ≈ requests` with a queue that never drained is a stalled worker.
+
 ## Cleanup / reset
 
 The bench container is removed automatically at the end of every run (EXIT
@@ -286,6 +307,8 @@ Neither mode leaves residue behind the other.
 | `STRESS_USER_SCHEME` | `unique` | `unique` or `flood` (shared id pool → duplicate storm) |
 | `SALE_TOTAL_QUANTITY` | `1000` | stock per sale for re-arm |
 | `STRESS_WINDOW_MINUTES` | `60` | active window length after re-arm |
+| `STRESS_DRAIN_TIMEOUT` | `30` | seconds to wait for the queue to empty before verifying (queue mode) |
+| `STRESS_QUEUE_NAME` | `flash-sale-purchases` | the BullMQ queue the API writes to |
 | `STRESS_ADD_HOST` | `auto` | override the `host.docker.internal` probe for the bench container |
 | `STRESS_DATABASE_URL` / `STRESS_REDIS_URL` | `host.docker.internal…` | what the API container talks to |
 

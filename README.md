@@ -454,10 +454,33 @@ non-zero on any violation:
   certify anything, so it is reported as `VERIFY: FAIL` and exits non-zero
 - `sold_count == purchase rows` (one committed row per sale)
 - `sold_count <= total_quantity` (no oversell — catches `OVERSOLD`)
-- `distinct winners == sold_count`, and the count matches the expected winners
-  (`min(users, stock)` for unique ids, `min(pool size, stock)` for flood)
+- the committed count equals the number of winners the run was entitled to:
+  `min(buyers, stock)`, where "buyers" is the vusers that started under unique
+  ids, the shared id pool under `flood`, and — in queue mode, where the client
+  only ever sees `202 accepted` — the distinct buyers the broker accepted work
+  for. In sync mode the client also knows *who* won, so the set of `201`
+  responses must equal the committed rows as well
+- in **queue mode the queue has to be empty before any of that is read** (see
+  below), because the response is `202` and the row lands later
 - when `STRESS_SSE_WATCHERS > 0`, every watched sale must have delivered at
   least one live SSE frame and every connection must have opened cleanly
+
+**Queue mode gets a drain wait, because a queue that is still in flight cannot
+certify anything.** Stopping the load generator does not stop the worker: at
+run end the broker can still be holding thousands of accepted purchases, and
+`SELECT sold_count` at that instant is a snapshot of a queue still committing,
+not ground truth. Measured here by pausing the worker for the first 9s of a
+10s run: **27,160 jobs still in the broker and `sold_count = 0` when Locust
+stopped.** The harness therefore polls the BullMQ keys (`wait`, `active`,
+`paused`, `delayed`, `prioritized`, `waiting-children`) to zero before it reads
+Postgres — in that run it waited **2.3s** and then certified a settled sale at
+`sold_count = 500` of 500 entitled buyers. If the queue does not empty within
+`STRESS_DRAIN_TIMEOUT` (default 30s) the run is reported as
+`VERIFY: PARTIAL — … the queue never drained` and **exits non-zero**, because a
+moving target is not a pass. Left as it was, the same run printed a green
+`VERIFY: PASS` and exit 0 with the winner count check skipped entirely for
+queue mode — a sale where all 28,550 accepted purchases had committed nothing
+was a certified pass.
 
 The base host defaults to `http://localhost:3000`, so the command above needs no
 `-H`. Pass `-H` or set `STRESS_HOST` to point elsewhere; `npm run bench` uses
@@ -471,9 +494,12 @@ Behavior is tuned via env vars: `STRESS_HOST` (base URL when `-H` is absent),
 per-vuser id or `flood` pooled ids), `STRESS_FLOOD_USERS`,
 `SALE_TOTAL_QUANTITY` (stock, applied to every sale), `STRESS_WINDOW_MINUTES`
 (active window length), `STRESS_SSE_WATCHERS` (how many SSE subscribers to
-spawn; they open real streams and are verified on stop), `DATABASE_URL`,
-`REDIS_URL`. The old TS `stress/` harness was replaced by this; the Postgres
-invariants it enforced live on in the Locust hooks.
+spawn; they open real streams and are verified on stop),
+`STRESS_DRAIN_TIMEOUT` (how long to wait for the queue to empty before
+verifying, queue mode only), `STRESS_QUEUE_NAME` (the BullMQ queue the API
+writes to), `DATABASE_URL`, `REDIS_URL`. The old TS `stress/` harness was
+replaced by this; the Postgres invariants it enforced live on in the Locust
+hooks.
 
 `npm run stress` is a thin alias: `cd stress/locust && locust` (pass flags
 after `--`).
@@ -556,7 +582,7 @@ spawn storm, then both modes run on the 409/410 fast path) and **stock 10**
 | | committed rows | 10 · 10 · 10 | 10 · 10 · 10 (drained, verified) |
 | both | max | 44-54 s | 43-50 s |
 | both | request failures | 0 · 0 · 0 | 0 · 0 · 0 |
-| both | verify | PASS ×3 | PASS ×3 |
+| both | verify | PASS ×3 | PASS ×3 (winner count checked after the drain) |
 
 Takeaways:
 
@@ -602,5 +628,9 @@ catalog, admin) responsive while the DB is saturated, bounding *client* latency
 at the enqueue hop, and retrying failed transactions off the hot path. If the
 goal is "fastest request latency on the dockerized bench," the two modes are
 equivalent; if the goal is "client responds fast even when the store is the
-bottleneck, accepting eventual commit," queue is the tool — the two modes and
-the tradeoff are intentional (see AGENTS.md golden rule).
+bottleneck, accepting eventual commit," queue is the tool. Both write paths end
+at the same transaction — `INSERT … WHERE NOT EXISTS` then the conditional
+`UPDATE … WHERE sold_count < total_quantity` — and the mode switch only changes
+where that transaction is invoked, never what it is allowed to conclude, which
+is why the two modes commit identical row counts in all 12 runs and why the mode
+is a deployment decision rather than a correctness one.

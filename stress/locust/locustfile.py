@@ -30,6 +30,12 @@ run starts from a clean, live state. On run stop the three invariants are
 verified per sale straight from Postgres and a non-zero exit code is set if any
 are violated; SSE watchers must each have received at least one live frame.
 
+In queue mode the client only ever sees 202 "accepted", so rows land after the
+run: the harness therefore waits for the broker to drain before it reads
+Postgres, and it checks the committed winner count in queue mode as well. A
+queue that will not drain is reported as VERIFY: PARTIAL (non-zero exit) rather
+than a PASS, because a moving target cannot certify anything.
+
 Behavior is tunable through the same env vars the old TS harness used, plus the
 multi-sale and SSE additions:
   STRESS_RESET           re-arm the sales before the run      (default "true")
@@ -43,11 +49,15 @@ multi-sale and SSE additions:
   SALE_ID                legacy name for a single sale (alias of STRESS_SALES)
   STRESS_SSE_WATCHERS    how many SSE subscribers to spawn    (default 0)
   STRESS_HOST            base URL when -H is not passed       (default "http://localhost:3000")
+  STRESS_DRAIN_TIMEOUT   seconds to wait for the queue to      (default 30)
+                         empty before verifying (queue mode only)
+  STRESS_QUEUE_NAME      BullMQ queue the API writes to       (default "flash-sale-purchases")
   DATABASE_URL / REDIS_URL                                     (local defaults)
 """
 
 import itertools
 import os
+import time
 
 import gevent
 import psycopg
@@ -66,6 +76,19 @@ REARM = os.getenv("STRESS_RESET", "true").lower() != "false"
 USER_SCHEME = os.getenv("STRESS_USER_SCHEME", "unique").lower()
 FLOOD_USERS = int(os.getenv("STRESS_FLOOD_USERS", "50"))
 SSE_WATCHERS = int(os.getenv("STRESS_SSE_WATCHERS", "0"))
+# Queue mode: the client only ever sees 202 "accepted", so the rows land after
+# the run. How long to wait for the worker to drain before reading Postgres.
+DRAIN_TIMEOUT_S = float(os.getenv("STRESS_DRAIN_TIMEOUT", "30"))
+PURCHASE_QUEUE = os.getenv("STRESS_QUEUE_NAME", "flash-sale-purchases")
+
+# BullMQ's key layout, from the library itself
+# (bullmq/dist/*/classes/queue-keys.js). The types are spelled out because they
+# are not interchangeable — a ZCARD against a list is a WRONGTYPE error, and a
+# harness that cannot read the queue cannot say whether it drained:
+# `wait`/`active`/`paused`/`waiting-children` are lists (the worker moves jobs
+# with RPOPLPUSH), `delayed`/`prioritized` are sorted sets.
+BULL_LIST_KEYS = ("wait", "active", "paused", "waiting-children")
+BULL_ZSET_KEYS = ("delayed", "prioritized")
 
 # HTTP statuses that are correct, expected flash-sale outcomes — everything
 # else (5xx, timeouts, unexpected codes) is a Locust failure.
@@ -79,6 +102,10 @@ STARTED: dict[str, int] = {s: 0 for s in SALE_IDS}
 ASSIGNED: dict[str, set[str]] = {s: set() for s in SALE_IDS}
 QUEUE_MODE: list[bool] = [False]  # flip when a 202 "accepted" is observed
 ACCEPTED: dict[str, int] = {s: 0 for s in SALE_IDS}  # 202 enqueued per sale
+# Distinct buyers the broker accepted work for. In queue mode this — not WINS —
+# is the population the winner count is computed over: a 202 is the only way a
+# row can come to exist, and it is the only commit-shaped answer the client sees.
+ACCEPTED_USERS: dict[str, set[str]] = {s: set() for s in SALE_IDS}
 SSE_EVENTS: dict[str, int] = {s: 0 for s in SALE_IDS}  # frames received per sale
 SSE_ERRORS: list[int] = [0]
 SSE_GREENLETS: list[gevent.Greenlet] = []
@@ -168,11 +195,25 @@ def _on_test_start(environment, **kwargs):  # noqa: ANN001, ANN003
 def _on_test_stop(environment, **kwargs):  # noqa: ANN001, ANN003
     for g in SSE_GREENLETS:
         g.kill(block=False)
-    failures = _verify(environment)
+    failures, undrained = _verify(environment)
     if failures:
         print("VERIFY: FAIL — invariants broken under load")
         for f in failures:
             print(f"  - {f}")
+        if undrained:
+            print(f"  ! the queue had not drained, so the counts above were read "
+                  f"mid-flight: {undrained}")
+        environment.process_exit_code = 1
+    elif undrained:
+        # Every invariant that could be checked held, but a queue that will not
+        # empty means the winner count was compared against a moving target.
+        # This used to print a bare PASS. A run that cannot certify itself is not
+        # a pass, so it exits non-zero and says why.
+        print(
+            "VERIFY: PARTIAL — invariants held, but the queue never drained, so "
+            f"the winner count is not certified: {undrained} "
+            f"({_stats(environment.stats.num_requests)})"
+        )
         environment.process_exit_code = 1
     else:
         print(
@@ -181,7 +222,85 @@ def _on_test_stop(environment, **kwargs):  # noqa: ANN001, ANN003
         )
 
 
-def _verify(environment):
+def _queue_depth(client) -> int:
+    """Jobs BullMQ still owns: waiting, in flight, delayed, or paused."""
+    depth = sum(client.llen(f"bull:{PURCHASE_QUEUE}:{k}") for k in BULL_LIST_KEYS)
+    return depth + sum(client.zcard(f"bull:{PURCHASE_QUEUE}:{k}") for k in BULL_ZSET_KEYS)
+
+
+def _wait_for_drain() -> tuple[str, float]:
+    """Block until the worker has finished everything this run enqueued.
+
+    Verifying before the drain is a false green. In queue mode the response is
+    202 and the row appears later, so a stop-time read of Postgres is a snapshot
+    of a queue still in flight: during a kill -9 run the harness used to print
+    "VERIFY: PASS" while the sale sat at 706 of 1,000. Waiting turns that into
+    either a real PASS against a settled sale or an explicit PARTIAL.
+
+    Returns (reason, seconds_waited); reason is "" when the queue emptied.
+    """
+    started = time.monotonic()
+    try:
+        client = redis.Redis.from_url(REDIS_URL)
+        depth = _queue_depth(client)
+    except Exception as err:  # noqa: BLE001
+        return (
+            f"could not read {PURCHASE_QUEUE} at {REDIS_URL} to check the drain ({err})",
+            0.0,
+        )
+    if depth == 0:
+        return "", 0.0
+    print(
+        f"drain: {PURCHASE_QUEUE} still holds {depth} job(s) at run end; "
+        f"waiting up to {DRAIN_TIMEOUT_S:.0f}s for the worker"
+    )
+    deadline = started + DRAIN_TIMEOUT_S
+    while time.monotonic() < deadline:
+        try:
+            depth = _queue_depth(client)
+        except Exception as err:  # noqa: BLE001
+            return f"lost contact with the queue while draining ({err})", time.monotonic() - started
+        if depth == 0:
+            waited = time.monotonic() - started
+            return "", waited
+        time.sleep(0.25)
+    try:
+        depth = _queue_depth(client)
+    except Exception:  # noqa: BLE001
+        depth = -1
+    return (
+        f"{PURCHASE_QUEUE} still held {depth} job(s) after {DRAIN_TIMEOUT_S:.0f}s",
+        time.monotonic() - started,
+    )
+
+
+def _expected_winners(sale_id: str, total: int) -> tuple[int, int]:
+    """How many rows this run should have committed, and how many buyers that is.
+
+    Sync mode saw a 201 per winner, so the expectation can be stated against
+    every vuser that started: each one is a distinct buyer (unique scheme) or a
+    member of the fixed pool (flood), and the sale either serves them all or
+    sells out, so min(buyers, stock) rows must exist.
+
+    Queue mode only ever saw 202s, so the population is the distinct buyers the
+    broker accepted work for — a 202 is the only way a row can come to exist.
+    That is a smaller and *tighter* population than "vusers started": a vuser
+    killed by the ramp-down before its first request never asked for anything, and
+    a buyer whose requests were all rejected after the window closed never had a
+    job. Neither belongs in the expectation, and counting them would fail the run
+    for something that has nothing to do with the write path.
+    """
+    if QUEUE_MODE[0]:
+        buyers = len(ACCEPTED_USERS[sale_id])
+    elif USER_SCHEME == "flood":
+        buyers = len(ASSIGNED[sale_id])
+    else:
+        buyers = STARTED[sale_id]
+    return min(buyers, total), buyers
+
+
+def _verify(environment) -> tuple[list[str], str | None]:
+    """Returns (failures, undrained_reason)."""
     failures = []
     num_requests = environment.stats.num_requests
     # A run that sent nothing verifies nothing. Refusing to print PASS here is
@@ -199,6 +318,13 @@ def _verify(environment):
             f"locust recorded {environment.stats.num_failures} failures for only "
             f"{num_requests} requests, which means the stats are inconsistent"
         )
+    # Queue mode: the rows land after the response, so Postgres is only ground
+    # truth once the broker is empty. Read it settled, not mid-flight.
+    undrained = ""
+    if QUEUE_MODE[0]:
+        undrained, waited = _wait_for_drain()
+        if not undrained:
+            print(f"drain: {PURCHASE_QUEUE} empty after {waited:.1f}s")
     with psycopg.connect(DB_URL) as conn:
         for sale_id in SALE_IDS:
             (sold, purchases, total) = conn.execute(
@@ -219,21 +345,30 @@ def _verify(environment):
                     f"[{sale_id}] OVERSOLD: sold_count={sold} > total_quantity={total}"
                 )
 
-            if not QUEUE_MODE[0]:
-                if len(WINS[sale_id]) != sold:
-                    failures.append(
-                        f"[{sale_id}] {len(WINS[sale_id])} 'purchased' responses "
-                        f"but {sold} committed rows"
-                    )
-                expected = (
-                    min(STARTED[sale_id], total)
-                    if USER_SCHEME != "flood"
-                    else min(len(ASSIGNED[sale_id]), total)
+            if not QUEUE_MODE[0] and len(WINS[sale_id]) != sold:
+                # Sync mode saw a 201 per winner, so the client knows exactly who
+                # won and that set has to be the rows.
+                failures.append(
+                    f"[{sale_id}] {len(WINS[sale_id])} 'purchased' responses "
+                    f"but {sold} committed rows"
                 )
-                if sold != expected:
-                    failures.append(
-                        f"[{sale_id}] sold_count={sold}, expected {expected} winners"
-                    )
+
+            # The count check used to sit inside `if not QUEUE_MODE`, so queue
+            # mode verified only "rows == sold_count" and "sold_count <= stock".
+            # That is how a sale sitting at 706 of 1,000 could be reported as
+            # PASS. The count is checkable in both modes: the mode decides which
+            # population the expectation is computed over, not whether to check.
+            expected, buyers = _expected_winners(sale_id, total)
+            if sold != expected:
+                population = (
+                    "distinct buyers the queue accepted"
+                    if QUEUE_MODE[0]
+                    else "vusers started"
+                )
+                failures.append(
+                    f"[{sale_id}] sold_count={sold}, expected {expected} winners "
+                    f"({buyers} {population}, stock {total})"
+                )
 
     if SSE_WATCHERS > 0:
         for sale_id in SALE_IDS:
@@ -244,7 +379,7 @@ def _verify(environment):
 
     if environment.stats.num_failures > 0:
         failures.append(f"{environment.stats.num_failures} request failures")
-    return failures
+    return failures, undrained or None
 
 
 def _stats(num_requests: int) -> str:
@@ -252,7 +387,11 @@ def _stats(num_requests: int) -> str:
     sse = sum(SSE_EVENTS.values())
     if QUEUE_MODE[0]:
         accepted = sum(ACCEPTED.values())
-        return f"{num_requests} requests, {accepted} accepted, {sse} SSE frames"
+        buyers = sum(len(s) for s in ACCEPTED_USERS.values())
+        return (
+            f"{num_requests} requests, {accepted} accepted "
+            f"({buyers} distinct buyers), {sse} SSE frames"
+        )
     return f"{num_requests} requests, {wins} wins, {sse} SSE frames"
 
 
@@ -297,6 +436,7 @@ class FlashSaleUser(HttpUser):
             elif code == 202:
                 QUEUE_MODE[0] = True
                 ACCEPTED[self.sale_id] += 1
+                ACCEPTED_USERS[self.sale_id].add(self.user_id)
                 resp.success()
             elif code in EXPECTED_CODES:
                 resp.success()

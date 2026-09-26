@@ -16,6 +16,7 @@
   "scripts": {
     "db:up": "docker compose -f infra/docker-compose.yml up -d",
     "db:down": "docker compose -f infra/docker-compose.yml down",
+    "dev:up": "sh bin/dev-up.sh",
     "db:reset": "docker compose -f infra/docker-compose.yml down -v && npm run db:up -s && sh -c 'until docker compose -f infra/docker-compose.yml exec -T postgres pg_isready -U flash -d flash_sale >/dev/null 2>&1; do sleep 1; done' && npm run db:migrate -s",
     "db:logs": "docker compose -f infra/docker-compose.yml logs -f",
     "db:migrate": "npm run migrate -w @flash-sale/server",

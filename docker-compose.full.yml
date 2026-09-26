@@ -1,0 +1,94 @@
+# The whole application, one command: `npm run dev:up` (or ./bin/dev-up.sh).
+#
+# This file is the *application* stack — API, web, and the stores they need.
+# infra/docker-compose.yml is the *dev-dependency* stack: Postgres and Redis
+# only, published on the host so the npm scripts can reach them. Two files
+# because they want opposite things from the ports: this one must not publish
+# Postgres or Redis, so that it can run beside an existing dev stack without
+# fighting it for 5433 and 6379.
+#
+# No `container_name` anywhere, and an explicit project name, so nothing here can
+# collide with a stack another checkout left running. Compose-generated names are
+# namespaced to the project: flash-sale-demo-{postgres,redis,api,web}-1.
+
+name: flash-sale-demo
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: flash
+      POSTGRES_PASSWORD: flash
+      POSTGRES_DB: flash_sale
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U flash -d flash_sale"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+
+  redis:
+    image: redis:7-alpine
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+
+  api:
+    build:
+      context: .
+      dockerfile: docker/api.Dockerfile
+    environment:
+      # Inside the compose network the stores are reachable by service name, and
+      # the container's own 5432 is what postgres listens on.
+      DATABASE_URL: postgres://flash:flash@postgres:5432/flash_sale
+      REDIS_URL: redis://redis:6379
+      PORT: '3000'
+      HOST: 0.0.0.0
+      # Per-request lines are debug; info keeps the lifecycle lines and drops
+      # the request trace. See the README's configuration table.
+      LOG_LEVEL: info
+    ports:
+      # The host side is overridable so `API_PORT=3010 bin/dev-up.sh` moves the
+      # published port *and* the one the script probes. The container side is
+      # fixed at 3000 because that is what PORT above and /readyz are.
+      - '${API_PORT:-3000}:3000'
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    healthcheck:
+      # /readyz reports Postgres and Redis, not just "the process is up", so this
+      # is what makes "the stack is ready" mean the stack can actually serve a
+      # purchase. No curl in the image: node has global fetch.
+      test:
+        - CMD
+        - node
+        - -e
+        - "fetch('http://127.0.0.1:3000/readyz').then(r => process.exit(r.ok ? 0 : 1)).catch(() => process.exit(1))"
+      interval: 3s
+      timeout: 3s
+      retries: 30
+      start_period: 10s
+
+  web:
+    build:
+      context: .
+      dockerfile: docker/web.Dockerfile
+    environment:
+      # The load-bearing bit. The SPA is served from Vite and reaches the API
+      # through the dev server's proxy, which is why the server has no CORS
+      # config at all. Inside this container "localhost" is the web container, so
+      # the proxy target has to be the compose service name.
+      API_PROXY_TARGET: http://api:3000
+    ports:
+      - '${WEB_PORT:-5173}:5173'
+    depends_on:
+      api:
+        condition: service_healthy
+
+volumes:
+  pgdata:

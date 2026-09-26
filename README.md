@@ -187,13 +187,24 @@ sale B — "one item per user" is scoped per sale.
 ## Repo layout
 
 ```
-infra/            docker-compose (postgres + redis) and SQL schema
+bin/dev-up.sh     One-command full stack: build, up, health-wait, stream logs, Ctrl-C to stop
+docker/           Dockerfiles for the API and the web app (the one-command demo's images)
+docker-compose.full.yml  The application stack — api + web + its own Postgres and Redis
+infra/            The dev-dependency stack: docker-compose (postgres + redis, published
+                  on the host for the npm scripts) and the SQL schema
 packages/shared/  Pure TS package: sale-window resolver + API contract types
 apps/server/      Fastify API (business logic, repository layer, optional BullMQ queue)
 apps/web/         React 19 + Vite SPA (sale selector + `#/admin` management page)
 apps/e2e/         Playwright end-to-end suite against the real stack
 stress/           Locust load-test harness (locustfile + Postgres verifier) + dockerized bench
 ```
+
+Two compose files, because they want opposite things from the ports. The
+dev-dependency stack publishes Postgres on `5433` and Redis on `6379` so the npm
+scripts and the test suites can reach them from the host. The application stack
+publishes **neither** — its Postgres and Redis are reachable only on the
+private compose network by service name — so it can run *beside* an existing dev
+stack without fighting it for those ports.
 
 ## Stack
 
@@ -210,7 +221,69 @@ transaction; there is no alternate write path.
 
 ## Getting started
 
-Prereqs: **Node >= 22** and **Docker** (for local Postgres/Redis). All commands
+### The whole thing, one command
+
+Prereqs: **Docker** and **Node >= 22** (Node only for `npm`; the stack itself
+runs in containers). From the repo root:
+
+```bash
+npm run dev:up
+```
+
+That builds the two images (first run takes a few minutes, afterwards it is
+cached), starts Postgres, Redis, the API and the web app, waits until the stack
+can actually serve a purchase, prints the URL, and streams the logs. **Ctrl-C
+takes it back down.**
+
+```
+  ┌──────────────────────────────────────────────────────────────┐
+  │  Flash sale is running.                                      │
+  │                                                              │
+  │    Open   http://localhost:5173                              │
+  │    Admin  http://localhost:5173/#/admin                      │
+  │    API    http://localhost:3000/api/sales                    │
+  │                                                              │
+  │  The web app talks to the API through Vite's /api proxy, so   │
+  │  buy from the page, not from the API port.                   │
+  └──────────────────────────────────────────────────────────────┘
+```
+
+Open <http://localhost:5173>, pick a sale, hit **Buy now**.
+
+The banner is printed only after both ends have answered: the API's `/readyz`
+(which checks Postgres and Redis, not merely that the process is listening) and
+the web app's entry module. Vite answers `200` on `/` even when it cannot
+transform the app's code, so the script fetches `index.html` *and* every module
+it references — probing only `/` is how a broken app gets announced as running.
+
+**If the stack does not come up, the failing container's name and the tail of
+its logs are printed, and nothing is removed.** A failure that deletes its own
+evidence is not a failure you can debug, so every failure path leaves the
+containers in place and tells you the command that clears them
+(`docker compose -p flash-sale-demo -f docker-compose.full.yml down`).
+
+The script will not drop a volume it did not create. The only `-v` it ever
+passes is behind `--fresh`, qualified with its own compose project name, so it
+can only ever remove `flash-sale-demo_pgdata` — never the dev stack's volume.
+
+| Flag / variable | Effect |
+| --------------- | ------ |
+| *(none)* | Build the images, start the stack, wait for it, stream logs |
+| `--fresh` | Start from an empty database volume |
+| `--no-build` | Reuse the images already built, skip the build |
+| `API_PORT` / `WEB_PORT` | Move the published ports (and the ones the script probes), e.g. `API_PORT=3010 WEB_PORT=5180 npm run dev:up` |
+
+The script refuses to start if a port is held by something that is not its own
+leftovers, and says so instead of colliding with it.
+
+This stack is a *second* Postgres and Redis, private to the compose network. It
+does not touch the dev stack below, and it does not need it running.
+
+### Running without Docker
+
+Prefer running the processes on the host — this is how the tests and the load
+harness run, and it is the configuration the test suites are written against.
+Prereqs: **Node >= 22** and **Docker** (for Postgres/Redis only). All commands
 run at repo root.
 
 ```bash
@@ -224,7 +297,8 @@ npm run dev:web      # Vite React SPA on :5173 (proxies /api -> :3000)
 The migrate script seeds **three** demo sales (see [Multi-sale seeding](#multi-sale-seeding)):
 `flash-sale-001` defaults to 1,000 units at $199.00 with a window of
 `now - 5m` → `now + 60m` so a fresh demo is immediately active. All defaults
-live in `apps/server/src/config.ts`.
+live in `apps/server/src/config.ts`. The same seed runs inside the one-command
+stack, so the three demo sales exist there too.
 
 **That window is one hour long, so a demo set up on a lunch break has ended by
 the time you come back.** Re-running `npm run db:migrate` fixes it: the seed is
@@ -232,8 +306,11 @@ self-healing — any demo sale whose window has already closed is re-armed with 
 live window, `sold_count` zeroed and its purchases cleared (a live sale is left
 strictly alone, so this is safe to run mid-sale). It also flushes the advisory
 Redis keys of anything it re-armed, so a previous run's buyer can't be told
-`409 already_purchased` for a row that no longer exists. For a full wipe,
-including a sale that is still live, use `db:reset` below.
+`409 already_purchased` for a row that no longer exists. The one-command stack
+does the same thing for you: it runs the migration on every start, so
+`--fresh`-less restarts re-arm an expired sale instead of handing you three
+ENDED sales and a `410` from every Buy Now. For a full wipe, including a sale
+that is still live, use `db:reset` below.
 
 Stop the containers with `npm run db:down`.
 
@@ -264,6 +341,7 @@ To be explicit about what each suite needs and does to get to a clean state:
 | ------------------- | ------- | -------------------- |
 | Unit + integration tests | `npm test` | Needs `db:up` + `db:migrate` first. Integration tests seed their own `test-*` sales with known state and delete them on teardown; unit tests are DB-free. |
 | Full clean stack + dev servers | `npm run db:reset` then `npm run dev:server` + `npm run dev:web` | All three demo sales active, zero stock sold. |
+| One-command stack (Docker) | `npm run dev:up -- --fresh` | Drops **only** `flash-sale-demo_pgdata`, its own volume, then re-applies schema + seeds. Never touches the dev stack's volume. Plain `npm run dev:up` reuses the volume and re-arms any expired sale on start. |
 | Browser e2e suite | `npm run test:e2e` | Runs `db:up` + `db:migrate` itself; `globalSetup` re-arms the demo sales (sold_count → 0, live window) and flushes their Redis keys; each test seeds its own `e2e-*` sale and deletes it after. |
 | Locust load test (host server) | `npm run stress -s -- <flags>` | Re-arms every `STRESS_SALES` sale on start (wipes purchases, zeroes `sold_count`, re-seeds stock, sets a live window, flushes the Redis fast-path). |
 | Dockerized benchmark | `npm run bench -s -- <flags>` | Same re-arm as Locust; the container is removed when the run ends. |
@@ -366,7 +444,18 @@ them on teardown, so the shared dev DB's catalog stays uncluttered.
   parallel attempts by one user → exactly one win; 100 users vs stock 50 →
   exactly 50 winners; N users vs stock N → everyone wins once and
   `sold_count == distinct purchases` everywhere. The admin suite drives the
-  full CRUD/reset/delete surface and verifies catalog cleanup.
+  full CRUD/reset/delete surface and verifies catalog cleanup. A suite-isolation
+  suite asserts the teardown leaves nothing behind in either store.
+
+### CI
+
+There is no CI workflow in this repository, deliberately. Every claim in this
+README — the mode comparison, the invariant checks, the SSE fan-out — is backed
+by a command you can run yourself, quoted with its exact output below, rather
+than by a green check on someone else's machine. If you want the gate, the
+harness is already shaped for it: `stress/locust/verify.py` documents itself as
+a CI-style gate and the Locust hooks set a non-zero exit code on any broken
+invariant, so `npm run stress` is a pass/fail command, not just a report.
 
 ## End-to-end tests (Playwright)
 

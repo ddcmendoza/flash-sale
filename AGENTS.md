@@ -18,13 +18,22 @@ architecture story and diagram.
 ## Repo layout
 
 ```
-infra/            docker-compose (postgres + redis) and SQL schema
+bin/dev-up.sh      One-command full stack: build, up, health-wait, stream, Ctrl-C to stop
+docker/            Dockerfiles for the API and web app (tsx + Vite, same code as dev)
+docker-compose.full.yml  The application stack: api + web + a private Postgres and Redis
+infra/             The dev-dependency stack: docker-compose (postgres + redis, published
+                   on the host for the npm scripts) and the SQL schema
 packages/shared/  Pure TS package: sale-window resolver + API contract types
 apps/server/      Fastify API (business logic, repository layer, optional BullMQ queue)
 apps/web/         React 19 + Vite SPA (sale selector; live data over SSE)
 apps/e2e/         Playwright suite against the real stack (see Testing)
 stress/           Locust load-test harness (locustfile.py + Postgres verifier) + dockerized bench
 ```
+
+Two compose files on purpose: the dev stack publishes Postgres/Redis on host
+ports for the npm scripts and test suites; the application stack publishes
+neither, so it can run beside an existing dev stack without fighting it for
+5433/6379.
 
 ## Golden rules (do not violate)
 
@@ -62,6 +71,7 @@ Prereqs: Node >= 22, Docker (for local PG/Redis). All commands run at repo root.
 
 ```
 npm install                # install all workspaces
+npm run dev:up              # ONE COMMAND full stack in Docker: build, up, health-wait, stream, Ctrl-C to stop
 npm run db:up              # start postgres + redis in Docker
 npm run db:migrate         # apply schema + seed the sale config (idempotent; does NOT reset sold_count/purchases)
 npm run db:reset           # wipe Postgres data volume + restart + re-migrate (true clean slate)
@@ -157,3 +167,9 @@ npm run db:down            # stop containers
 | Vite dev server | 5173 |
 | Postgres | 5433 (host) → 5432 (container) |
 | Redis | 6379 |
+
+Ports 3000/5173 are shared by both stacks — `dev:up` (compose) and
+`dev:server`/`dev:web` (host) both want them, so only one may run at a time;
+override with `API_PORT`/`WEB_PORT` on `dev:up`. The compose stack's own
+Postgres and Redis publish **nothing** to the host, so they never collide with
+5433/6379.

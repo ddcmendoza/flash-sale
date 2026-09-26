@@ -1,22 +1,25 @@
-# Bench image build context (stress/docker/Dockerfile*) only needs the
-# workspace manifests + apps/ + packages/ source. Everything else bloats the
-# context transfer — worst on macOS, where the Docker daemon lives in a VM and
-# the whole context crosses the socket at every build.
+# Build-context trim. Both app images and the bench images COPY a few explicit
+# paths, but the *context* is whatever the daemon receives — without this, every
+# `docker build` ships node_modules (159 MB) and the Locust venv (101 MB) to the
+# daemon and then throws them away. Only things no image needs are listed here:
+# trimming a directory that an image copies would break the `COPY` instead.
+node_modules
+**/node_modules
+stress/locust/.venv
+**/.venv
+**/__pycache__
+**/*.pyc
 
-node_modules/
-**/node_modules/
+.git
+.gitignore
+.dockerignore
 
-.git/
-.lavish/
-.stress/
-test-results/
-playwright-report/
-stress/locust/.venv/
-stress/locust/*.log
-stress/docker/.run.err
-apps/e2e/test-results/
-apps/e2e/playwright-report/
-
-*.log
-dist/
-coverage/
+dist
+build
+**/dist
+**/build
+coverage
+**/coverage
+**/test-results
+**/playwright-report
+**/.vite

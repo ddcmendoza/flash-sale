@@ -63,6 +63,40 @@ export function createAdvisoryRedis(url: string, label: string): Redis {
 }
 
 /**
+ * Wait until a client is actually connected before issuing the first command.
+ *
+ * Fail-fast options cut both ways: `enableOfflineQueue: false` means a command
+ * issued before the socket is up *rejects immediately* rather than waiting. In
+ * the long-running server that is invisible (commands happen seconds after
+ * startup), but a short script that creates a client and immediately calls
+ * `keys()` gets an instant rejection — which a `.catch(() => [])` then hides.
+ *
+ * Resolves as soon as the client is ready, and rejects if it is not within
+ * `timeoutMs` so callers can decide what to do.
+ */
+export async function awaitRedisReady(redis: Redis, timeoutMs = 2_000): Promise<void> {
+  if (redis.status === 'ready') return;
+  await new Promise<void>((resolve, reject) => {
+    const done = (err?: Error): void => {
+      clearTimeout(timer);
+      redis.off('ready', onReady);
+      redis.off('error', onError);
+      if (err) reject(err);
+      else resolve();
+    };
+    const onReady = (): void => done();
+    const onError = (err: Error): void => done(err);
+    const timer = setTimeout(
+      () => done(new Error(`redis not ready after ${timeoutMs}ms`)),
+      timeoutMs,
+    );
+    timer.unref();
+    redis.once('ready', onReady);
+    redis.once('error', onError);
+  });
+}
+
+/**
  * Log connection errors, never crash on them. Every advisory call site is
  * `.catch()`-guarded and falls through to Postgres, so these are expected
  * during an outage and survivable.

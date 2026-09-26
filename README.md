@@ -224,6 +224,15 @@ The migrate script seeds **three** demo sales (see [Multi-sale seeding](#multi-s
 `now - 5m` → `now + 60m` so a fresh demo is immediately active. All defaults
 live in `apps/server/src/config.ts`.
 
+**That window is one hour long, so a demo set up on a lunch break has ended by
+the time you come back.** Re-running `npm run db:migrate` fixes it: the seed is
+self-healing — any demo sale whose window has already closed is re-armed with a
+live window, `sold_count` zeroed and its purchases cleared (a live sale is left
+strictly alone, so this is safe to run mid-sale). It also flushes the advisory
+Redis keys of anything it re-armed, so a previous run's buyer can't be told
+`409 already_purchased` for a row that no longer exists. For a full wipe,
+including a sale that is still live, use `db:reset` below.
+
 Stop the containers with `npm run db:down`.
 
 ## Reset to a clean state
@@ -241,10 +250,11 @@ That runs `docker compose down -v` (drops the `pgdata` volume), brings the
 containers back up, and re-runs `db:migrate`, which applies the schema and seeds
 the three demo sales from scratch.
 
-> `npm run db:migrate` alone does **not** reset data: its seeding upsert uses
-> `ON CONFLICT DO NOTHING`, so re-running it leaves existing purchases and
-> `sold_count` untouched (useful for bringing the schema forward without losing
-> state). Reset with `db:reset` when you want a clean slate.
+> `npm run db:migrate` alone does **not** reset data: existing purchases and
+> `sold_count` are left untouched on a sale whose window is still live (useful
+> for bringing the schema forward without losing state), and only a sale whose
+> window has already **closed** is re-armed. Reset with `db:reset` when you want
+> a clean slate regardless of window state.
 
 To be explicit about what each suite needs and does to get to a clean state:
 

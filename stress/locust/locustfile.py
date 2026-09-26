@@ -42,6 +42,7 @@ multi-sale and SSE additions:
   STRESS_WINDOW_MINUTES  active window length after re-arm    (default 60)
   SALE_ID                legacy name for a single sale (alias of STRESS_SALES)
   STRESS_SSE_WATCHERS    how many SSE subscribers to spawn    (default 0)
+  STRESS_HOST            base URL when -H is not passed       (default "http://localhost:3000")
   DATABASE_URL / REDIS_URL                                     (local defaults)
 """
 
@@ -182,6 +183,22 @@ def _on_test_stop(environment, **kwargs):  # noqa: ANN001, ANN003
 
 def _verify(environment):
     failures = []
+    num_requests = environment.stats.num_requests
+    # A run that sent nothing verifies nothing. Refusing to print PASS here is
+    # the whole point: an aborted run (bad host, unreachable API, every spawn
+    # failed) used to re-arm the sales, check a pristine dataset, and report
+    # "invariants held under load (0 requests, 0 wins)" with exit code 0.
+    if num_requests == 0:
+        failures.append(
+            f"no load was applied: {num_requests} requests were sent, so the "
+            "invariants were never exercised (check -H/STRESS_HOST and that the "
+            "API is reachable)"
+        )
+    if environment.stats.num_failures > num_requests:
+        failures.append(
+            f"locust recorded {environment.stats.num_failures} failures for only "
+            f"{num_requests} requests, which means the stats are inconsistent"
+        )
     with psycopg.connect(DB_URL) as conn:
         for sale_id in SALE_IDS:
             (sold, purchases, total) = conn.execute(
@@ -240,6 +257,12 @@ def _stats(num_requests: int) -> str:
 
 
 class FlashSaleUser(HttpUser):
+    # A default host so the documented `npm run stress` command works without
+    # `-H`. Without it Locust aborts with "You must specify the base host",
+    # sends zero requests, and the run still exits 0 with a green VERIFY: PASS —
+    # the most expensive way to print a number that means nothing. `STRESS_HOST`
+    # or `-H` both override this; the bench harness sets the container port.
+    host = os.getenv("STRESS_HOST", "http://localhost:3000")
     wait_time = constant(0)  # no think time: every vuser hammers back-to-back
 
     def on_start(self) -> None:

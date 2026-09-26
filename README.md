@@ -437,6 +437,9 @@ Redis fast-path flushed), so it never depends on a stale seed. On stop it
 **verifies the three invariants straight from Postgres** per sale and exits
 non-zero on any violation:
 
+- the run actually applied load — **0 requests is a failure**, not a pass. A run
+  that never reached the API (bad host, API down, every spawn failed) cannot
+  certify anything, so it is reported as `VERIFY: FAIL` and exits non-zero
 - `sold_count == purchase rows` (one committed row per sale)
 - `sold_count <= total_quantity` (no oversell — catches `OVERSOLD`)
 - `distinct winners == sold_count`, and the count matches the expected winners
@@ -444,9 +447,14 @@ non-zero on any violation:
 - when `STRESS_SSE_WATCHERS > 0`, every watched sale must have delivered at
   least one live SSE frame and every connection must have opened cleanly
 
+The base host defaults to `http://localhost:3000`, so the command above needs no
+`-H`. Pass `-H` or set `STRESS_HOST` to point elsewhere; `npm run bench` uses
+both to reach the pinned container.
+
 `verify.py` is the same Postgres ground-truth check standalone (multi-sale aware
 via `STRESS_SALES`), for post-hoc runs (e.g. in CI after a headless run).
-Behavior is tuned via env vars: `STRESS_SALES` (comma-separated sale ids;
+Behavior is tuned via env vars: `STRESS_HOST` (base URL when `-H` is absent),
+`STRESS_SALES` (comma-separated sale ids;
 `SALE_ID` is the legacy single-sale alias), `STRESS_USER_SCHEME` (`unique`
 per-vuser id or `flood` pooled ids), `STRESS_FLOOD_USERS`,
 `SALE_TOTAL_QUANTITY` (stock, applied to every sale), `STRESS_WINDOW_MINUTES`
